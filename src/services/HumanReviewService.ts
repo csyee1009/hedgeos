@@ -24,43 +24,78 @@ export class HumanReviewService {
     const nowMs = Date.now();
     const warnings: string[] = [];
 
-    // Binding check between simulation and proposal
-    const isDigestBound = simulation.proposalDigest === proposal.proposalDigest;
-    const isProposalBound = simulation.proposalId === proposal.proposalId;
-    const isIntentBound = simulation.intentId === intent.intentId && simulation.intentVersion === intent.version;
+    const isDigestBound =
+      simulation.proposalDigest === proposal.proposalDigest;
+    const isProposalBound =
+      simulation.proposalId === proposal.proposalId;
+    const isIntentBound =
+      simulation.intentId === intent.intentId &&
+      simulation.intentVersion === intent.version;
 
-    if (!isDigestBound) warnings.push("Simulation proposal digest does not match current proposal digest.");
-    if (!isProposalBound) warnings.push("Simulation proposal ID does not match current proposal ID.");
-    if (!isIntentBound) warnings.push("Simulation intent version does not match confirmed intent version.");
+    if (!isDigestBound) {
+      warnings.push(
+        "Simulation proposal digest does not match current proposal digest."
+      );
+    }
 
-    // Status check
+    if (!isProposalBound) {
+      warnings.push(
+        "Simulation proposal ID does not match current proposal ID."
+      );
+    }
+
+    if (!isIntentBound) {
+      warnings.push(
+        "Simulation intent version does not match confirmed intent version."
+      );
+    }
+
     const isSimStatusOk =
       simulation.status === "PROVIDER_SIMULATED" ||
       simulation.status === "DETERMINISTIC_VERIFIED" ||
       simulation.status === "PREVIEW_ONLY";
 
     if (!isSimStatusOk) {
-      warnings.push(`Simulation status is ${simulation.status}. Proposal is not ready for human review.`);
+      warnings.push(
+        `Simulation status is ${simulation.status}. Proposal is not ready for human review.`
+      );
     }
 
     if (simulation.marketEvidenceStatus !== "FRESH") {
-      warnings.push(`Market evidence is ${simulation.marketEvidenceStatus}. Fresh market evidence is required before review.`);
+      warnings.push(
+        `Market evidence is ${simulation.marketEvidenceStatus}. Fresh market evidence is required before review.`
+      );
     }
 
-    const allChecksPassed = simulation.verificationChecks.length > 0 && simulation.verificationChecks.every((c) => c.passed);
+    const allChecksPassed =
+      simulation.verificationChecks.length > 0 &&
+      simulation.verificationChecks.every((check) => check.passed);
+
     if (!allChecksPassed) {
       warnings.push("One or more simulation verification checks failed.");
     }
 
     const isDownsideValid =
       effectiveDownsidePercent !== undefined &&
+      Number.isFinite(effectiveDownsidePercent) &&
       effectiveDownsidePercent >= 0 &&
       effectiveDownsidePercent <= intent.targetMaxLossPercent.value;
 
     if (effectiveDownsidePercent === undefined) {
       warnings.push("Modeled downside percentage is not available.");
-    } else if (effectiveDownsidePercent > intent.targetMaxLossPercent.value) {
-      warnings.push(`Modeled downside (${effectiveDownsidePercent.toFixed(2)}%) exceeds confirmed target max loss (${intent.targetMaxLossPercent.value}%).`);
+    } else if (
+      !Number.isFinite(effectiveDownsidePercent) ||
+      effectiveDownsidePercent < 0
+    ) {
+      warnings.push("Modeled downside value is invalid.");
+    } else if (
+      effectiveDownsidePercent > intent.targetMaxLossPercent.value
+    ) {
+      warnings.push(
+        `Modeled downside (${effectiveDownsidePercent.toFixed(
+          2
+        )}%) exceeds confirmed target max loss (${intent.targetMaxLossPercent.value}%).`
+      );
     }
 
     const isEligibleForReview =
@@ -72,28 +107,63 @@ export class HumanReviewService {
       allChecksPassed &&
       isDownsideValid;
 
-    const exposureAmountStr = `${Number(BigInt(intent.exposureAmount.value.amountBaseUnits)) / 10 ** intent.exposureAmount.value.decimals} ${intent.asset.value}`;
-    const strikePriceStr = `$${(Number(BigInt(proposal.expectedStrike.amountBaseUnits)) / 10 ** proposal.expectedStrike.decimals).toFixed(2)} USD`;
-    const costStr = proposal.expectedTotalCost
-      ? `${(Number(BigInt(proposal.expectedTotalCost.amountBaseUnits)) / 10 ** proposal.expectedTotalCost.decimals).toFixed(2)} USDC`
-      : "UNPRICED (Sealed RFQ)";
+    const exposureAmountStr = `${Number(BigInt(intent.exposureAmount.value.amountBaseUnits)) /
+      10 ** intent.exposureAmount.value.decimals
+      } ${intent.asset.value}`;
+
+    const strikePriceStr = `$${Number(BigInt(proposal.expectedStrike.amountBaseUnits)) /
+      10 ** proposal.expectedStrike.decimals
+      } USD`;
+
+    const latestExpectedCost =
+      simulation.expectedTotalCost ?? proposal.expectedTotalCost;
+
+    const costStr = latestExpectedCost
+      ? `${Number(BigInt(latestExpectedCost.amountBaseUnits)) /
+      10 ** latestExpectedCost.decimals
+      } ${latestExpectedCost.symbol}`
+      : "UNPRICED / NOT AVAILABLE";
+
+    const strategyType =
+      proposal.normalizedParameters?.strategyType;
+
+    const structureName =
+      strategyType === "PUT_SPREAD"
+        ? "Put Spread"
+        : strategyType === "LONG_PUT"
+          ? "Long Put"
+          : "Protection Option";
+
+    const marketPath =
+      proposal.actionType === "OPTIONBOOK_FILL_ORDER"
+        ? "OptionBook"
+        : "RFQ";
 
     const summary: HumanReviewSummary = {
       protectingAsset: intent.asset.value,
       exposureQuantity: exposureAmountStr,
       untilDate: intent.horizonTimestamp.value.formattedDisplay,
-      structure: proposal.actionType === "OPTIONBOOK_FILL_ORDER" ? "Long Put (OptionBook)" : "Long Put (RFQ)",
+      structure: `${structureName} (${marketPath})`,
       strikePriceUSD: strikePriceStr,
       estimatedCostUSDC: costStr,
-      modeledDownsidePercent: effectiveDownsidePercent !== undefined ? `${effectiveDownsidePercent.toFixed(2)}%` : "NOT_AVAILABLE",
-      liveMarketCheck: simulation.marketEvidenceStatus === "FRESH" ? "Passed (Fresh)" : simulation.marketEvidenceStatus,
-      simulationStatus: isSimStatusOk ? "Passed (Verified)" : `Failed (${simulation.status})`,
-      authorizationRequirement: "Requires separate eligible human authorization. No transaction submitted.",
+      modeledDownsidePercent:
+        effectiveDownsidePercent !== undefined &&
+          Number.isFinite(effectiveDownsidePercent)
+          ? `${effectiveDownsidePercent.toFixed(2)}%`
+          : "NOT_AVAILABLE",
+      liveMarketCheck:
+        simulation.marketEvidenceStatus === "FRESH"
+          ? "Passed (Fresh)"
+          : simulation.marketEvidenceStatus,
+      simulationStatus: isSimStatusOk
+        ? "Passed (Verified)"
+        : `Failed (${simulation.status})`,
+      authorizationRequirement:
+        "Requires separate eligible human authorization. No transaction submitted.",
     };
 
-    const reviewStatus: HumanReviewRecord["reviewStatus"] = isEligibleForReview
-      ? "READY_FOR_REVIEW"
-      : "NOT_PRESENTED";
+    const reviewStatus: HumanReviewRecord["reviewStatus"] =
+      isEligibleForReview ? "READY_FOR_REVIEW" : "NOT_PRESENTED";
 
     return {
       reviewId: `rev-${Math.random().toString(36).substring(2, 9)}`,
@@ -104,7 +174,7 @@ export class HumanReviewService {
       simulationId: simulation.simulationId,
       presentedAtMs: nowMs,
       reviewStatus,
-      executionStatus: "NOT_AUTHORIZED", // Strictly immutable boundary
+      executionStatus: "NOT_AUTHORIZED",
       warnings,
       summary,
       toctouDisclosure:

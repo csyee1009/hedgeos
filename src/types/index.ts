@@ -535,3 +535,195 @@ export interface ProtectionSolverPipelineResult {
   policyDecisions: Record<string, PolicyDecisionRecord>;
   marketState?: MarketStateRecord;
 }
+
+export type PortfolioSource = "PUBLIC_BASE_ADDRESS" | "MANUAL";
+
+export interface PortfolioTokenBalance {
+  asset: "ETH" | "WETH" | "BTC" | "CBBTC" | "USDC";
+  displaySymbol: string;
+  amountBaseUnits: string;
+  decimals: number;
+  formattedAmount: string;
+  tokenAddress?: string;
+  source: "BASE_MAINNET_READ";
+}
+
+export interface ReadOnlyPortfolioSnapshot {
+  address: string;
+  chainId: 8453;
+  capturedAtMs: number;
+  balances: PortfolioTokenBalance[];
+  status: "AVAILABLE" | "PARTIAL" | "UNAVAILABLE";
+  warnings: string[];
+}
+
+export type AuthorizationAttestationStatus =
+  | "REJECTED"
+  | "SCOPE_ATTESTED_PREVIEW_ONLY"
+  | "EXTERNAL_AUTHORIZATION_ELIGIBLE";
+
+export interface BoundedAuthorizationScope {
+  chainId: 8453;
+  protocol: "THETANUTS";
+  actionType: "OPTIONBOOK_FILL_ORDER";
+  targetContract: string;
+  asset: string;
+  optionRight: "PUT";
+  proposalId: string;
+  proposalDigest: string;
+  intentId: string;
+  intentVersion: number;
+  simulationId: string;
+  boundQuoteId?: string;
+  maxSpendUSDC: TokenAmount;
+  expectedTotalCostUSDC: TokenAmount;
+  expectedQuantity: TokenAmount;
+  expectedExpiryMs: number;
+}
+
+export interface BoundedAuthorizationAttestation {
+  attestationId: string;
+  attestationDigest: string;
+  createdAtMs: number;
+  status: AuthorizationAttestationStatus;
+  executionStatus: "NOT_AUTHORIZED";
+  canExecute: false;
+  scope?: BoundedAuthorizationScope;
+  checks: Array<{
+    check: string;
+    passed: boolean;
+    details: string;
+  }>;
+  blockers: string[];
+  disclosure: string;
+}
+
+export type ExecutionCommitmentStatus =
+  | "PROPOSAL_BOUND"
+  | "EXTERNAL_PAYLOAD_BOUND"
+  | "BLOCKED"
+  | "EXPIRED";
+
+export interface ExecutionCommitment {
+  commitmentId: string;
+  commitmentDigest: string;
+
+  intentId: string;
+  intentVersion: number;
+
+  proposalId: string;
+  proposalDigest: string;
+
+  authorizationAttestationId: string;
+  authorizationAttestationDigest: string;
+
+  chainId: 8453;
+  protocol: "THETANUTS";
+
+  actionType:
+    | "OPTIONBOOK_FILL_ORDER"
+    | "REQUEST_FOR_QUOTATION";
+
+  targetContract: string;
+
+  expectedAsset: string;
+  expectedOptionRight: "PUT";
+
+  expectedQuantity: TokenAmount;
+  expectedTotalCostUSDC?: TokenAmount;
+  expectedExpiryMs: number;
+
+  externalExecutorPayloadDigest?: string;
+
+  createdAtMs: number;
+  expiresAtMs: number;
+
+  status: ExecutionCommitmentStatus;
+
+  executionStatus: "NOT_AUTHORIZED";
+  canExecute: false;
+}
+
+export type ExternalHumanAuthorizationStatus =
+  | "AWAITING_EXTERNAL_HUMAN"
+  | "BLOCKED"
+  | "EXPIRED"
+  | "CONSUMED";
+
+export interface ExternalHumanAuthorizationHandoff {
+  requestId: string;
+
+  intentId: string;
+  intentVersion: number;
+
+  proposalId: string;
+  proposalDigest: string;
+
+  authorizationAttestationId: string;
+  authorizationAttestationDigest: string;
+
+  executionCommitmentId: string;
+  executionCommitmentDigest: string;
+
+  chainId: 8453;
+  protocol: "THETANUTS";
+
+  maximumSpendUSDC: TokenAmount;
+  expectedExpiryMs: number;
+
+  createdAtMs: number;
+  expiresAtMs: number;
+
+  status: ExternalHumanAuthorizationStatus;
+
+  executionStatus: "NOT_AUTHORIZED";
+  canExecute: false;
+
+  disclosure: string;
+}
+
+export interface AuditReceipt {
+  receiptId: string;
+  receiptDigest: string;
+
+  intentId: string;
+  intentVersion: number;
+  confirmedAtMs?: number;
+
+  intentDigest: string;
+
+  marketEvidenceTimestampMs?: number;
+  marketEvidenceStatus?: MarketEvidenceStatus;
+
+  selectedStrategyId?: string;
+
+  policyDecisionIds: string[];
+  financialConstitutionStatus:
+    | "PASS"
+    | "FAIL"
+    | "INCOMPLETE"
+    | "NOT_AVAILABLE";
+
+  proposalId?: string;
+  proposalDigest?: string;
+
+  simulationId?: string;
+  simulationStatus?: SimulationResult["status"];
+
+  humanReviewId?: string;
+
+  authorizationAttestationId?: string;
+  authorizationAttestationDigest?: string;
+
+  executionCommitmentId?: string;
+  executionCommitmentDigest?: string;
+
+  externalAuthorizationHandoffId?: string;
+  externalAuthorizationHandoffStatus?: ExternalHumanAuthorizationStatus;
+
+  finalExecutionStatus: "NOT_AUTHORIZED";
+
+  createdAtMs: number;
+}
+
+

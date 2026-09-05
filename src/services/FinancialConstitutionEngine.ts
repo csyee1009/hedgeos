@@ -5,72 +5,169 @@ import {
   PolicyDecisionRecord,
   PolicyDecisionStatus,
   PolicyEvaluationStage,
+  TokenAmount,
   TypedRiskIntent,
 } from "../types";
 
-export class FinancialConstitutionEngine implements PolicyEngine {
+const normalizeAsset = (asset: string): string => {
+  const normalized = asset.toUpperCase();
+
+  if (normalized === "WETH") {
+    return "ETH";
+  }
+
+  if (normalized === "CBBTC") {
+    return "BTC";
+  }
+
+  return normalized;
+};
+
+const getVerifiedCost = (
+  candidate: CandidateStrategy
+): TokenAmount | undefined => {
+  if (
+    candidate.preview?.previewStatus ===
+    "PREVIEW_AVAILABLE"
+  ) {
+    if (
+      candidate.preview.feeStatus === "AVAILABLE" ||
+      candidate.preview.feeStatus === "ZERO_VERIFIED"
+    ) {
+      return candidate.preview.totalExpectedCost;
+    }
+
+    return undefined;
+  }
+
+  const quotePremium =
+    candidate.quotes[0]?.premium;
+
+  if (!quotePremium) {
+    return undefined;
+  }
+
+  try {
+    if (
+      BigInt(
+        quotePremium.amountBaseUnits
+      ) <= 0n
+    ) {
+      return undefined;
+    }
+  } catch {
+    return undefined;
+  }
+
+  return quotePremium;
+};
+
+export class FinancialConstitutionEngine
+  implements PolicyEngine {
   public async evaluatePolicy(
     intent: TypedRiskIntent,
     candidate: CandidateStrategy,
     stage: PolicyEvaluationStage = "EXECUTION"
   ): Promise<PolicyDecisionRecord> {
     const checks: PolicyCheckItem[] = [];
-    const isMultiLeg = candidate.legs.length > 1 || candidate.strategyType === "PUT_SPREAD";
 
-    // POL-001: Budget Constraint Policy
-    const quoteCost = candidate.preview?.totalExpectedCost || candidate.quotes[0]?.premium;
+    const isMultiLeg =
+      candidate.legs.length > 1 ||
+      candidate.strategyType ===
+      "PUT_SPREAD";
+
+    const quoteCost =
+      getVerifiedCost(candidate);
 
     if (!quoteCost) {
       if (stage === "RFQ_SPECIFICATION") {
         checks.push({
           ruleId: "POL-001",
-          description: "Transaction premium does not exceed user's confirmed maximum budget limit",
+          description:
+            "Transaction premium does not exceed user's confirmed maximum budget limit",
           status: "NOT_EVALUATED",
-          details: "Budget evaluation pending RFQ market maker quotation pricing (unknown before quotes arrive)",
+          details:
+            "Budget evaluation pending RFQ market maker quotation pricing (unknown before quotes arrive)",
         });
       } else {
         checks.push({
           ruleId: "POL-001",
-          description: "Transaction premium does not exceed user's confirmed maximum budget limit",
+          description:
+            "Transaction premium does not exceed user's confirmed maximum budget limit",
           status: "FAIL",
-          details: "No verified preview pricing or quote premium available to evaluate budget limit",
+          details:
+            "No verified preview pricing or quote premium available to evaluate budget limit",
         });
       }
     } else {
-      const budgetSymbol = intent.maxPremiumUSDC.value.symbol.toUpperCase();
-      const quoteSymbol = quoteCost.symbol.toUpperCase();
+      const budgetSymbol =
+        intent.maxPremiumUSDC.value.symbol.toUpperCase();
 
-      // Step 1: Denomination symbol check
-      if (quoteSymbol !== budgetSymbol) {
+      const quoteSymbol =
+        quoteCost.symbol.toUpperCase();
+
+      if (
+        quoteSymbol !== budgetSymbol
+      ) {
         checks.push({
           ruleId: "POL-001",
-          description: "Transaction premium denomination matches user's confirmed budget currency",
+          description:
+            "Transaction premium denomination matches user's confirmed budget currency",
           status: "FAIL",
-          details: `Denomination mismatch: Premium token symbol (${quoteCost.symbol}) does not match budget symbol (${intent.maxPremiumUSDC.value.symbol})`,
+          details:
+            `Denomination mismatch: Premium token symbol (${quoteCost.symbol}) does not match budget symbol (${intent.maxPremiumUSDC.value.symbol})`,
         });
       } else {
-        // Step 2: Decimal normalization using pure BigInt arithmetic
-        const quoteDecimals = quoteCost.decimals;
-        const budgetDecimals = intent.maxPremiumUSDC.value.decimals;
+        const quoteDecimals =
+          quoteCost.decimals;
 
-        const quoteAmount = BigInt(quoteCost.amountBaseUnits);
-        const budgetAmount = BigInt(intent.maxPremiumUSDC.value.amountBaseUnits);
+        const budgetDecimals =
+          intent.maxPremiumUSDC.value.decimals;
 
-        let normalizedQuote = quoteAmount;
-        let normalizedBudget = budgetAmount;
+        const quoteAmount =
+          BigInt(
+            quoteCost.amountBaseUnits
+          );
 
-        if (quoteDecimals < budgetDecimals) {
-          normalizedQuote = quoteAmount * 10n ** BigInt(budgetDecimals - quoteDecimals);
-        } else if (quoteDecimals > budgetDecimals) {
-          normalizedBudget = budgetAmount * 10n ** BigInt(quoteDecimals - budgetDecimals);
-        }
+        const budgetAmount =
+          BigInt(
+            intent.maxPremiumUSDC.value
+              .amountBaseUnits
+          );
 
-        const isWithinBudget = normalizedQuote <= normalizedBudget;
+        const comparisonDecimals =
+          Math.max(
+            quoteDecimals,
+            budgetDecimals
+          );
+
+        const normalizedQuote =
+          quoteAmount *
+          10n **
+          BigInt(
+            comparisonDecimals -
+            quoteDecimals
+          );
+
+        const normalizedBudget =
+          budgetAmount *
+          10n **
+          BigInt(
+            comparisonDecimals -
+            budgetDecimals
+          );
+
+        const isWithinBudget =
+          normalizedQuote <=
+          normalizedBudget;
 
         checks.push({
           ruleId: "POL-001",
-          description: "Transaction premium does not exceed user's confirmed maximum budget limit",
-          status: isWithinBudget ? "PASS" : "FAIL",
+          description:
+            "Transaction premium does not exceed user's confirmed maximum budget limit",
+          status: isWithinBudget
+            ? "PASS"
+            : "FAIL",
           details: isWithinBudget
             ? `Normalized premium (${normalizedQuote.toString()}) <= Normalized budget (${normalizedBudget.toString()})`
             : `Normalized premium (${normalizedQuote.toString()}) exceeds normalized budget (${normalizedBudget.toString()})`,
@@ -78,203 +175,345 @@ export class FinancialConstitutionEngine implements PolicyEngine {
       }
     }
 
-    // POL-002: Target Asset Policy (Evidence must come strictly from candidate/specification, never defaulted from intent)
-    const intentAsset = intent.asset.value.toUpperCase();
-    const candidateAsset = candidate.quotes[0]?.asset?.toUpperCase() || (candidate as any).underlying?.toUpperCase();
+    const intentAsset =
+      normalizeAsset(
+        intent.asset.value
+      );
 
-    if (!candidateAsset) {
+    const candidateAssetRaw =
+      candidate.quotes[0]?.asset ||
+      (candidate as any).underlying;
+
+    if (!candidateAssetRaw) {
       checks.push({
         ruleId: "POL-002",
-        description: "Candidate option underlying asset matches user's target risk exposure",
+        description:
+          "Candidate underlying matches the user's protected asset",
         status: "FAIL",
-        details: "Candidate provides no underlying asset evidence",
+        details:
+          "Candidate provides no underlying asset evidence.",
       });
     } else {
-      const isAssetMatch = intentAsset === candidateAsset;
+      const candidateAsset =
+        normalizeAsset(
+          candidateAssetRaw
+        );
+
+      const isAssetMatch =
+        intentAsset ===
+        candidateAsset;
+
       checks.push({
         ruleId: "POL-002",
-        description: "Candidate option underlying asset matches user's target risk exposure",
-        status: isAssetMatch ? "PASS" : "FAIL",
+        description:
+          "Candidate underlying matches the user's protected asset",
+        status: isAssetMatch
+          ? "PASS"
+          : "FAIL",
         details: isAssetMatch
-          ? `Asset matches: ${candidateAsset}`
-          : `Asset mismatch: candidate is for ${candidateAsset}, but user intended ${intentAsset}`,
+          ? `Underlying matches confirmed asset ${intentAsset}.`
+          : `Candidate underlying ${candidateAsset} does not match confirmed asset ${intentAsset}.`,
       });
     }
 
-    // POL-003: Allowed Protocols Policy (Evidence must come strictly from candidate/specification, never defaulted to THETANUTS)
-    const allowed = intent.allowedProtocols.value.map((p) => p.toUpperCase());
-    const candidateProtocol = candidate.quotes[0]?.protocol || (candidate as any).protocol;
+    const allowed =
+      intent.allowedProtocols.value.map(
+        (protocol) =>
+          protocol.toUpperCase()
+      );
+
+    const candidateProtocol =
+      candidate.quotes[0]?.protocol ||
+      (candidate as any).protocol;
 
     if (!candidateProtocol) {
       checks.push({
         ruleId: "POL-003",
-        description: "Candidate protocol is within user's allowed protocol whitelist",
+        description:
+          "Candidate protocol is permitted by the confirmed intent",
         status: "FAIL",
-        details: "Candidate provides no protocol provenance evidence",
+        details:
+          "Candidate provides no protocol provenance evidence.",
       });
     } else {
-      const isProtocolAllowed = allowed.includes(candidateProtocol.toUpperCase());
+      const normalizedProtocol =
+        candidateProtocol.toUpperCase();
+
+      const isProtocolAllowed =
+        allowed.includes(
+          normalizedProtocol
+        );
+
       checks.push({
         ruleId: "POL-003",
-        description: "Candidate protocol is within user's allowed protocol whitelist",
-        status: isProtocolAllowed ? "PASS" : "FAIL",
+        description:
+          "Candidate protocol is permitted by the confirmed intent",
+        status: isProtocolAllowed
+          ? "PASS"
+          : "FAIL",
         details: isProtocolAllowed
-          ? `Protocol ${candidateProtocol} is whitelisted`
-          : `Protocol ${candidateProtocol} is not in whitelist (${allowed.join(", ")})`,
+          ? `Protocol ${normalizedProtocol} is allowed.`
+          : `Protocol ${normalizedProtocol} is not in the confirmed protocol list.`,
       });
     }
 
-    // POL-004: Execution Approval Security Policy
-    if (stage === "EXECUTION") {
-      checks.push({
-        ruleId: "POL-004",
-        description: "Execution proposal is authorized and unlimited token approvals are prohibited",
-        status: "NOT_EVALUATED",
-        details: "Execution proposal authorization required before transaction submission",
-      });
-    } else if (stage === "RFQ_SPECIFICATION") {
-      checks.push({
-        ruleId: "POL-004",
-        description: "Execution proposal is authorized and unlimited token approvals are prohibited",
-        status: "NOT_EVALUATED",
-        details: "Execution authorization boundary respected (RFQ specification only, not submitted)",
-      });
-    } else {
-      checks.push({
-        ruleId: "POL-004",
-        description: "Execution proposal is authorized and unlimited token approvals are prohibited",
-        status: "NOT_EVALUATED",
-        details: "Pre-execution analysis only; signing and wallet submission not requested",
-      });
-    }
+    checks.push({
+      ruleId: "POL-004",
+      description:
+        "Any financial execution requires a separate authorization boundary",
+      status: "NOT_EVALUATED",
+      details:
+        stage === "RFQ_SPECIFICATION"
+          ? "RFQ specification only; no RFQ or transaction has been submitted."
+          : stage === "ANALYSIS"
+            ? "Pre-execution analysis only; no signing or transaction submission is requested."
+            : "Execution authorization has not been evaluated or granted.",
+    });
 
-    // POL-005: User Intent Confirmation Policy
-    const isConfirmed = intent.confirmedByUser === true;
+    const isConfirmed =
+      intent.confirmedByUser === true;
+
     checks.push({
       ruleId: "POL-005",
-      description: "Candidate is bound to an explicitly user-confirmed TypedRiskIntent",
-      status: isConfirmed ? "PASS" : "FAIL",
+      description:
+        "Candidate is bound to an explicitly confirmed Typed Risk Intent",
+      status: isConfirmed
+        ? "PASS"
+        : "FAIL",
       details: isConfirmed
-        ? `Intent ${intent.intentId} (v${intent.version}) confirmed by user at ${intent.confirmedAtMs ? new Date(intent.confirmedAtMs).toISOString() : "timestamp verified"}`
+        ? `Intent ${intent.intentId} version ${intent.version} is explicitly confirmed.`
         : "Intent has not been explicitly confirmed by user",
     });
 
-    // POL-006: Protection Horizon Matching Policy
-    const userHorizonMs = intent.horizonTimestamp.value.timestampMs;
-    const candidateExpiryMs = candidate.legs[0]?.expiryTimestampMs || candidate.quotes[0]?.expiryTimestampMs;
+    const userHorizonMs =
+      intent.horizonTimestamp.value.timestampMs;
+
+    const candidateExpiryMs =
+      candidate.legs[0]
+        ?.expiryTimestampMs ||
+      candidate.quotes[0]
+        ?.expiryTimestampMs;
 
     if (!candidateExpiryMs) {
       checks.push({
         ruleId: "POL-006",
-        description: "Candidate option expiration covers user's confirmed protection horizon",
+        description:
+          "Option expiry covers the user's confirmed protection period",
         status: "FAIL",
-        details: "No expiration timestamp found on candidate option leg",
+        details:
+          "Candidate provides no verified option expiry.",
       });
     } else {
-      const isHorizonSufficient = candidateExpiryMs >= userHorizonMs;
+      const isHorizonSufficient =
+        candidateExpiryMs >=
+        userHorizonMs;
+
       checks.push({
         ruleId: "POL-006",
-        description: "Candidate option expiration covers user's confirmed protection horizon",
-        status: isHorizonSufficient ? "PASS" : "FAIL",
+        description:
+          "Option expiry covers the user's confirmed protection period",
+        status: isHorizonSufficient
+          ? "PASS"
+          : "FAIL",
         details: isHorizonSufficient
-          ? `Option expiry (${new Date(candidateExpiryMs).toISOString()}) covers horizon (${new Date(userHorizonMs).toISOString()})`
-          : `Option expires (${new Date(candidateExpiryMs).toISOString()}) before user's requested horizon (${new Date(userHorizonMs).toISOString()})`,
+          ? `Option expiry ${new Date(
+            candidateExpiryMs
+          ).toISOString()} covers confirmed horizon ${new Date(
+            userHorizonMs
+          ).toISOString()}.`
+          : `Option expires ${new Date(
+            candidateExpiryMs
+          ).toISOString()} before confirmed horizon ${new Date(
+            userHorizonMs
+          ).toISOString()}.`,
       });
     }
 
-    // POL-007: Multi-Leg Strategy Authorization Policy
     if (isMultiLeg) {
-      const userAllowedMultiLeg = intent.allowMultiLeg?.value === true;
+      const userAllowedMultiLeg =
+        intent.allowMultiLeg.value ===
+        true;
+
       checks.push({
         ruleId: "POL-007",
-        description: "Multi-leg option structures (e.g. Put Spread) require explicit user authorization",
-        status: userAllowedMultiLeg ? "PASS" : "FAIL",
-        details: userAllowedMultiLeg
-          ? "User has explicitly enabled multi-leg strategy authorization"
-          : "Strategy is a multi-leg structure (Put Spread) but user has allowMultiLeg = false",
+        description:
+          "Multi-leg option structures require explicit user permission",
+        status:
+          userAllowedMultiLeg
+            ? "PASS"
+            : "FAIL",
+        details:
+          userAllowedMultiLeg
+            ? "User explicitly permits multi-leg protection structures."
+            : "Candidate is multi-leg but the confirmed intent does not permit multi-leg structures.",
       });
     }
 
-    // POL-008: Sizing Resolution & Liquidity Adequacy Policy (Always exists)
-    const sizingResolved = candidate.sizingStatus === "RESOLVED";
-    const liquidityAdequate = candidate.liquiditySufficient !== false;
-    const pol008Passed = sizingResolved && (stage === "RFQ_SPECIFICATION" ? true : liquidityAdequate);
+    const sizingResolved =
+      candidate.sizingStatus ===
+      "RESOLVED";
 
-    checks.push({
-      ruleId: "POL-008",
-      description: "Option sizing is verified and maker orderbook liquidity satisfies requested exposure",
-      status: pol008Passed ? "PASS" : "FAIL",
-      details: pol008Passed
-        ? stage === "RFQ_SPECIFICATION"
-          ? "Option sizing verified for RFQ specification"
-          : "Option sizing verified and liquidity adequate"
-        : !sizingResolved
-        ? "Option sizing is NOT resolved"
-        : "Orderbook available liquidity is insufficient for requested exposure",
-    });
+    if (!sizingResolved) {
+      checks.push({
+        ruleId: "POL-008",
+        description:
+          "Protection quantity is resolved and available market capacity is sufficient",
+        status: "FAIL",
+        details:
+          "Option sizing is not resolved.",
+      });
+    } else if (
+      stage === "RFQ_SPECIFICATION"
+    ) {
+      checks.push({
+        ruleId: "POL-008",
+        description:
+          "Protection quantity is resolved and available market capacity is sufficient",
+        status: "PASS",
+        details:
+          "Protection quantity is resolved for the RFQ specification; OptionBook liquidity is not applicable to this unsubmitted custom quote specification.",
+      });
+    } else if (
+      candidate.liquiditySufficient ===
+      true
+    ) {
+      checks.push({
+        ruleId: "POL-008",
+        description:
+          "Protection quantity is resolved and available market capacity is sufficient",
+        status: "PASS",
+        details:
+          "Option sizing is resolved and verified market capacity is sufficient.",
+      });
+    } else if (
+      candidate.liquiditySufficient ===
+      false
+    ) {
+      checks.push({
+        ruleId: "POL-008",
+        description:
+          "Protection quantity is resolved and available market capacity is sufficient",
+        status: "FAIL",
+        details:
+          "Verified market capacity is insufficient for the requested protection quantity.",
+      });
+    } else {
+      checks.push({
+        ruleId: "POL-008",
+        description:
+          "Protection quantity is resolved and available market capacity is sufficient",
+        status: "NOT_EVALUATED",
+        details:
+          "Market capacity has not been verified.",
+      });
+    }
 
-    // POL-009: Protection Target Downside Floor Policy (Always exists)
-    if (candidate.payoffSummary && "effectiveDownsidePercent" in candidate.payoffSummary) {
-      const effectiveDownside = candidate.payoffSummary.effectiveDownsidePercent;
-      const targetLoss = intent.targetMaxLossPercent?.value ?? 8;
-      const pol009Passed = effectiveDownside <= targetLoss;
+    if (
+      candidate.payoffSummary &&
+      "effectiveDownsidePercent" in
+      candidate.payoffSummary
+    ) {
+      const effectiveDownside =
+        candidate.payoffSummary
+          .effectiveDownsidePercent;
+
+      const targetLoss =
+        intent.targetMaxLossPercent.value;
+
+      const targetMet =
+        effectiveDownside <= targetLoss;
 
       checks.push({
         ruleId: "POL-009",
-        description: "Calculated at-expiry downside does not exceed user's confirmed target max loss",
-        status: pol009Passed ? "PASS" : "FAIL",
-        details: pol009Passed
-          ? `Calculated effective downside (${effectiveDownside}%) <= confirmed target (${targetLoss}%)`
-          : `Calculated effective downside (${effectiveDownside}%) exceeds confirmed target (${targetLoss}%)`,
+        description:
+          "Modeled at-expiry downside does not exceed the user's confirmed target",
+        status: targetMet
+          ? "PASS"
+          : "FAIL",
+        details: targetMet
+          ? `Modeled downside ${effectiveDownside}% is within confirmed target ${targetLoss}%.`
+          : `Modeled downside ${effectiveDownside}% exceeds confirmed target ${targetLoss}%.`,
       });
     } else {
       checks.push({
         ruleId: "POL-009",
-        description: "Calculated at-expiry downside does not exceed user's confirmed target max loss",
+        description:
+          "Modeled at-expiry downside does not exceed the user's confirmed target",
         status: "NOT_EVALUATED",
-        details: "Target downside evaluation pending RFQ quotation pricing (unknown before quotes arrive)",
+        details:
+          stage === "RFQ_SPECIFICATION"
+            ? "Modeled downside cannot be evaluated before RFQ pricing is available."
+            : "Verified payoff evidence is unavailable, so the confirmed downside target cannot be evaluated.",
       });
     }
 
-    // Overall Status Determination
-    const hasFail = checks.some((c) => c.status === "FAIL");
-    let overallStatus: PolicyDecisionStatus = "PASS";
-    let passedAllInvariants = false;
+    const hasFail =
+      checks.some(
+        (check) =>
+          check.status === "FAIL"
+      );
+
+    let overallStatus:
+      PolicyDecisionStatus;
+
+    let passedAllInvariants =
+      false;
 
     if (hasFail) {
       overallStatus = "FAIL";
-      passedAllInvariants = false;
-    } else if (stage === "ANALYSIS") {
-      // In ANALYSIS stage, POL-004 being NOT_EVALUATED does NOT invalidate analysis eligibility
-      const analysisChecks = checks.filter((c) => c.ruleId !== "POL-004");
-      const allAnalysisPass = analysisChecks.every((c) => c.status === "PASS");
-      if (allAnalysisPass) {
-        overallStatus = "PASS";
-        passedAllInvariants = true;
-      } else {
-        overallStatus = "INCOMPLETE";
-        passedAllInvariants = false;
-      }
-    } else if (stage === "RFQ_SPECIFICATION") {
-      // Audit Item 5: In RFQ_SPECIFICATION stage, financial policy remains INCOMPLETE because pricing is unknown
-      // Do NOT falsely mark overallStatus = PASS or passedAllInvariants = true
-      overallStatus = "INCOMPLETE";
-      passedAllInvariants = false;
+    } else if (
+      stage === "ANALYSIS"
+    ) {
+      const analysisChecks =
+        checks.filter(
+          (check) =>
+            check.ruleId !==
+            "POL-004"
+        );
+
+      const allAnalysisPass =
+        analysisChecks.every(
+          (check) =>
+            check.status === "PASS"
+        );
+
+      overallStatus =
+        allAnalysisPass
+          ? "PASS"
+          : "INCOMPLETE";
+
+      passedAllInvariants =
+        allAnalysisPass;
+    } else if (
+      stage === "RFQ_SPECIFICATION"
+    ) {
+      overallStatus =
+        "INCOMPLETE";
     } else {
-      const hasNotEvaluated = checks.some((c) => c.status === "NOT_EVALUATED");
+      const hasNotEvaluated =
+        checks.some(
+          (check) =>
+            check.status ===
+            "NOT_EVALUATED"
+        );
+
       if (hasNotEvaluated) {
-        overallStatus = "INCOMPLETE";
-        passedAllInvariants = false;
+        overallStatus =
+          "INCOMPLETE";
       } else {
         overallStatus = "PASS";
-        passedAllInvariants = true;
+        passedAllInvariants =
+          true;
       }
     }
 
     return {
-      decisionId: `decision-${Math.random().toString(36).substring(2, 9)}`,
+      decisionId: `decision-${Math.random()
+        .toString(36)
+        .substring(2, 9)}`,
       intentId: intent.intentId,
-      strategyId: candidate.strategyId,
+      strategyId:
+        candidate.strategyId,
       overallStatus,
       passedAllInvariants,
       stage,

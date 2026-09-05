@@ -4,29 +4,47 @@ import {
   MarketEvidenceStatus,
   SimulationResult,
   SimulationVerificationCheck,
-  TokenAmount,
   TypedRiskIntent,
 } from "../types";
 import { ActionProposalBuilder } from "./ActionProposalBuilder";
 import { ExposurePayoffEngine } from "./ExposurePayoffEngine";
 import { ThetanutsMarketService } from "./ThetanutsMarketService";
 
-export const PRODUCT_MARKET_FRESHNESS_THRESHOLD_MS = 60_000; // 60s HedgeOS Product Freshness Policy (Documented Product Choice)
+export const PRODUCT_MARKET_FRESHNESS_THRESHOLD_MS = 60_000;
+
+const normalizeAsset = (asset: string): string => {
+  const normalized = asset.toUpperCase();
+
+  if (normalized === "WETH") {
+    return "ETH";
+  }
+
+  if (normalized === "CBBTC") {
+    return "BTC";
+  }
+
+  return normalized;
+};
+
+const normalizeBaseUnits = (
+  amount: bigint,
+  fromDecimals: number,
+  toDecimals: number
+): bigint => {
+  if (fromDecimals === toDecimals) {
+    return amount;
+  }
+
+  if (fromDecimals < toDecimals) {
+    return amount * 10n ** BigInt(toDecimals - fromDecimals);
+  }
+
+  return amount / 10n ** BigInt(fromDecimals - toDecimals);
+};
 
 export class ThetanutsSimulationService {
-  constructor(private marketService?: ThetanutsMarketService) {}
+  constructor(private marketService?: ThetanutsMarketService) { }
 
-  /**
-   * Executes a strictly READ-ONLY pre-execution simulation and verification on the ActionProposal.
-   * STRICT INVARIANTS:
-   * 1. Uses ZERO signers, zero wallets, zero private keys, zero transaction broadcasts.
-   * 2. Recomputes and validates the deterministic proposal digest before simulation.
-   * 3. Freshly executes SDK read-only protocol preview where available.
-   * 4. Reports PROVIDER_SIMULATED ONLY when a genuine provider read occurs; DETERMINISTIC_VERIFIED otherwise.
-   * 5. Derives market evidence freshness from real preview/quote timestamps (never Date.now() default).
-   * 6. Uses zero fake spot price defaults (rejects if spot price is <= 0).
-   * 7. Always marks bindingStatus as PREVIEW_BOUND (never fake EXACT_TRANSACTION_BOUND).
-   */
   public async simulateProposal(
     proposal: ActionProposal,
     intent: TypedRiskIntent,
@@ -35,36 +53,83 @@ export class ThetanutsSimulationService {
   ): Promise<SimulationResult> {
     const nowMs = Date.now();
     const verificationChecks: SimulationVerificationCheck[] = [];
-    const isRfq = proposal.actionType === "REQUEST_FOR_QUOTATION";
+    const isRfq =
+      proposal.actionType === "REQUEST_FOR_QUOTATION";
 
-    // 1. Proposal Digest Recomputation & Integrity Check
-    const recomputedDigest = ActionProposalBuilder.computeProposalDigest({
-      intentId: proposal.intentId,
-      intentVersion: proposal.intentVersion,
-      strategyId: proposal.strategyId,
-      protocol: proposal.protocol,
-      chainId: proposal.chainId,
-      actionType: proposal.actionType,
-      targetContract: proposal.targetContract,
-      asset: proposal.expectedAsset,
-      optionRight: proposal.expectedOptionRight,
-      strikeBaseUnits: proposal.expectedStrike.amountBaseUnits,
-      expiryTimestampMs: proposal.expectedExpiryMs,
-      quantityBaseUnits: proposal.expectedQuantity.amountBaseUnits,
-      expectedTotalCostBaseUnits: proposal.expectedTotalCost?.amountBaseUnits,
-      boundQuoteId: proposal.boundQuoteId,
-      orderIndex: proposal.normalizedParameters?.orderIndex,
-      makerAddress: proposal.normalizedParameters?.makerAddress,
-      feeStatus: proposal.feeStatus,
-    });
+    if (!intent.confirmedByUser) {
+      verificationChecks.push({
+        checkName: "CONFIRMED_INTENT_REQUIRED",
+        passed: false,
+        details:
+          "Simulation blocked because the Typed Risk Intent has not been explicitly confirmed by the user.",
+      });
 
-    const isDigestValid = recomputedDigest === proposal.proposalDigest;
+      return {
+        simulationId: `sim-${Math.random().toString(36).substring(2, 9)}`,
+        proposalId: proposal.proposalId,
+        proposalDigest: proposal.proposalDigest,
+        intentId: intent.intentId,
+        intentVersion: intent.version,
+        strategyId: proposal.strategyId,
+        status: "FAILED",
+        simulationMethod: "NONE",
+        chainId: proposal.chainId,
+        targetContract: proposal.targetContract,
+        bindingStatus: "PREVIEW_BOUND",
+        simulatedAtMs: nowMs,
+        marketEvidenceTimestampMs: 0,
+        marketEvidenceStatus: "UNAVAILABLE",
+        expectedPremium: proposal.expectedPremium,
+        expectedFees: proposal.expectedFees,
+        expectedTotalCost: proposal.expectedTotalCost,
+        feeStatus: proposal.feeStatus,
+        expectedExpiryMs: proposal.expectedExpiryMs,
+        expectedOptionQuantity: proposal.expectedQuantity,
+        expectedUnderlying: proposal.expectedAsset,
+        providerResultSummary:
+          "Simulation blocked: intent has not been explicitly confirmed.",
+        revertReason: "UNCONFIRMED_INTENT",
+        verificationChecks,
+        authorizedByHuman: false,
+      };
+    }
+
+    const recomputedDigest =
+      ActionProposalBuilder.computeProposalDigest({
+        intentId: proposal.intentId,
+        intentVersion: proposal.intentVersion,
+        strategyId: proposal.strategyId,
+        protocol: proposal.protocol,
+        chainId: proposal.chainId,
+        actionType: proposal.actionType,
+        targetContract: proposal.targetContract,
+        asset: proposal.expectedAsset,
+        optionRight: proposal.expectedOptionRight,
+        strikeBaseUnits:
+          proposal.expectedStrike.amountBaseUnits,
+        expiryTimestampMs:
+          proposal.expectedExpiryMs,
+        quantityBaseUnits:
+          proposal.expectedQuantity.amountBaseUnits,
+        expectedTotalCostBaseUnits:
+          proposal.expectedTotalCost?.amountBaseUnits,
+        boundQuoteId: proposal.boundQuoteId,
+        orderIndex:
+          proposal.normalizedParameters?.orderIndex,
+        makerAddress:
+          proposal.normalizedParameters?.makerAddress,
+        feeStatus: proposal.feeStatus,
+      });
+
+    const isDigestValid =
+      recomputedDigest === proposal.proposalDigest;
+
     verificationChecks.push({
       checkName: "PROPOSAL_DIGEST_INTEGRITY",
       passed: isDigestValid,
       details: isDigestValid
         ? "Proposal digest recomputation matches proposal identity exactly."
-        : `Proposal digest mismatch: stored '${proposal.proposalDigest}', recomputed '${recomputedDigest}'.`,
+        : "Proposal digest does not match the current proposal parameters.",
     });
 
     if (!isDigestValid) {
@@ -90,21 +155,24 @@ export class ThetanutsSimulationService {
         expectedExpiryMs: proposal.expectedExpiryMs,
         expectedOptionQuantity: proposal.expectedQuantity,
         expectedUnderlying: proposal.expectedAsset,
-        providerResultSummary: "Simulation rejected: proposal digest recomputation mismatch (material parameters altered).",
+        providerResultSummary:
+          "Simulation rejected: proposal digest recomputation mismatch.",
         revertReason: "PROPOSAL_DIGEST_MISMATCH",
         verificationChecks,
         authorizedByHuman: false,
       };
     }
 
-    // 2. Intent Version Binding Check
-    const isIntentVersionValid = proposal.intentId === intent.intentId && proposal.intentVersion === intent.version;
+    const isIntentVersionValid =
+      proposal.intentId === intent.intentId &&
+      proposal.intentVersion === intent.version;
+
     verificationChecks.push({
       checkName: "INTENT_VERSION_BINDING",
       passed: isIntentVersionValid,
       details: isIntentVersionValid
-        ? `Proposal bound to confirmed intent ${intent.intentId} at version ${intent.version}.`
-        : `Intent version mismatch: proposal is for version ${proposal.intentVersion}, current confirmed intent is version ${intent.version}.`,
+        ? `Proposal is bound to confirmed intent ${intent.intentId} version ${intent.version}.`
+        : `Proposal intent/version does not match the current confirmed intent.`,
     });
 
     if (!isIntentVersionValid) {
@@ -130,19 +198,20 @@ export class ThetanutsSimulationService {
         expectedExpiryMs: proposal.expectedExpiryMs,
         expectedOptionQuantity: proposal.expectedQuantity,
         expectedUnderlying: proposal.expectedAsset,
-        providerResultSummary: "Simulation rejected: confirmed intent was modified after proposal generation.",
+        providerResultSummary:
+          "Simulation rejected: confirmed intent changed after proposal generation.",
         revertReason: "INTENT_VERSION_STALE",
         verificationChecks,
         authorizedByHuman: false,
       };
     }
 
-    // 3. RFQ Path Honesty: Unsubmitted RFQs cannot be simulated as live transactions
     if (isRfq) {
       verificationChecks.push({
         checkName: "RFQ_STATUS_CHECK",
         passed: false,
-        details: "RFQ specification is unsubmitted. Cannot simulate unrevealed market maker quotation.",
+        details:
+          "RFQ specification is unsubmitted and has no live market-maker quotation.",
       });
 
       return {
@@ -167,178 +236,381 @@ export class ThetanutsSimulationService {
         expectedExpiryMs: proposal.expectedExpiryMs,
         expectedOptionQuantity: proposal.expectedQuantity,
         expectedUnderlying: proposal.expectedAsset,
-        providerResultSummary: "Simulation unavailable: RFQ specification has not been broadcast or quoted by market makers.",
-        revertReason: "RFQ_NOT_SUBMITTED_NO_LIVE_QUOTATION",
+        providerResultSummary:
+          "Simulation unavailable: RFQ specification has not been submitted or priced.",
+        revertReason:
+          "RFQ_NOT_SUBMITTED_NO_LIVE_QUOTATION",
         verificationChecks,
         authorizedByHuman: false,
       };
     }
 
-    // 4. Market Freshness Check (Derives strictly from real evidence timestamp)
-    const marketEvidenceTimestampMs =
-      candidate?.preview?.previewTimestampMs ||
-      (candidate?.quotes[0]?.rawApiData as any)?.timestampMs ||
-      (candidate?.quotes[0] as any)?.timestampMs ||
-      0;
+    const isChainMatch =
+      proposal.chainId === 8453;
 
-    let marketEvidenceStatus: MarketEvidenceStatus = "UNAVAILABLE";
-    if (marketEvidenceTimestampMs > 0) {
-      const ageMs = nowMs - marketEvidenceTimestampMs;
-      marketEvidenceStatus = ageMs <= PRODUCT_MARKET_FRESHNESS_THRESHOLD_MS ? "FRESH" : "STALE";
-    }
+    const isProtocolMatch =
+      proposal.protocol === "THETANUTS";
 
-    verificationChecks.push({
-      checkName: "MARKET_EVIDENCE_FRESHNESS",
-      passed: marketEvidenceStatus === "FRESH",
-      details:
-        marketEvidenceStatus === "FRESH"
-          ? `Market evidence is fresh (${Math.round((nowMs - marketEvidenceTimestampMs) / 1000)}s old <= ${PRODUCT_MARKET_FRESHNESS_THRESHOLD_MS / 1000}s threshold).`
-          : marketEvidenceStatus === "STALE"
-          ? `Market evidence is STALE (${Math.round((nowMs - marketEvidenceTimestampMs) / 1000)}s old > ${PRODUCT_MARKET_FRESHNESS_THRESHOLD_MS / 1000}s threshold). Refresh required.`
-          : "Market evidence timestamp is unavailable.",
-    });
+    const isAssetMatch =
+      normalizeAsset(proposal.expectedAsset) ===
+      normalizeAsset(intent.asset.value);
 
-    // 5. Exact Parameter Alignment Check
-    const isChainMatch = proposal.chainId === 8453;
-    const isProtocolMatch = proposal.protocol === "THETANUTS";
-    const isAssetMatch = proposal.expectedAsset.toUpperCase() === intent.asset.value.toUpperCase();
-    const isRightMatch = proposal.expectedOptionRight === "PUT";
+    const isRightMatch =
+      proposal.expectedOptionRight === "PUT";
 
     verificationChecks.push({
       checkName: "PROTOCOL_AND_ASSET_MATCH",
-      passed: isChainMatch && isProtocolMatch && isAssetMatch && isRightMatch,
-      details: `Base Mainnet (8453), Protocol ${proposal.protocol}, Underlying ${proposal.expectedAsset}, Right ${proposal.expectedOptionRight}.`,
+      passed:
+        isChainMatch &&
+        isProtocolMatch &&
+        isAssetMatch &&
+        isRightMatch,
+      details:
+        `Chain ${proposal.chainId}, protocol ${proposal.protocol}, underlying ${proposal.expectedAsset}, option right ${proposal.expectedOptionRight}.`,
     });
 
-    // 6. Fresh Read-Only Simulation Invocation vs Deterministic Verification
-    let simulatedPremium = proposal.expectedPremium;
-    let simulatedFees = proposal.expectedFees;
-    let simulatedTotalCost = proposal.expectedTotalCost;
-    let simulatedFeeStatus = proposal.feeStatus;
-    let simulationMethod: SimulationResult["simulationMethod"] = "DETERMINISTIC_VERIFICATION";
+    const candidateQuote =
+      candidate?.quotes[0];
+
+    const quoteBindingMatches =
+      !proposal.boundQuoteId ||
+      candidateQuote?.quoteId === proposal.boundQuoteId;
+
+    verificationChecks.push({
+      checkName: "QUOTE_BINDING",
+      passed: quoteBindingMatches,
+      details: quoteBindingMatches
+        ? proposal.boundQuoteId
+          ? `Candidate quote matches bound quote ${proposal.boundQuoteId}.`
+          : "Proposal does not require a bound OptionBook quote."
+        : "Candidate quote does not match the quote bound into the proposal.",
+    });
+
+    let simulatedPremium =
+      proposal.expectedPremium;
+
+    let simulatedFees =
+      proposal.expectedFees;
+
+    let simulatedTotalCost =
+      proposal.expectedTotalCost;
+
+    let simulatedFeeStatus =
+      proposal.feeStatus;
+
+    let simulationMethod:
+      SimulationResult["simulationMethod"] =
+      "DETERMINISTIC_VERIFICATION";
+
     let isProviderCallSuccessful = false;
 
-    if (this.marketService && candidate?.quotes[0]) {
-      try {
-        const freshPreview = await this.marketService.previewFill(
-          candidate.quotes[0],
-          BigInt(proposal.expectedQuantity.amountBaseUnits)
-        );
+    let marketEvidenceTimestampMs =
+      candidate?.preview?.previewTimestampMs ||
+      (candidateQuote?.rawApiData as any)?.timestampMs ||
+      (candidateQuote as any)?.timestampMs ||
+      0;
 
-        if (freshPreview.previewStatus === "PREVIEW_AVAILABLE") {
-          simulatedPremium = freshPreview.premiumAmount;
-          simulatedFees = freshPreview.protocolFee
-            ? {
-                amountBaseUnits: (
-                  BigInt(freshPreview.protocolFee.amountBaseUnits) +
-                  BigInt(freshPreview.referrerFee?.amountBaseUnits || "0")
-                ).toString(),
-                decimals: 6,
-                symbol: "USDC",
-              }
-            : undefined;
-          simulatedTotalCost = freshPreview.totalExpectedCost;
-          simulatedFeeStatus = freshPreview.feeStatus;
-          simulationMethod = "THETANUTS_OPTIONBOOK_PREVIEW";
+    if (
+      quoteBindingMatches &&
+      this.marketService &&
+      candidateQuote
+    ) {
+      try {
+        const freshPreview =
+          await this.marketService.previewFill(
+            candidateQuote,
+            BigInt(
+              proposal.expectedQuantity.amountBaseUnits
+            )
+          );
+
+        if (
+          freshPreview.previewStatus ===
+          "PREVIEW_AVAILABLE"
+        ) {
+          simulatedPremium =
+            freshPreview.premiumAmount;
+
+          simulatedFees = {
+            amountBaseUnits: (
+              BigInt(
+                freshPreview.protocolFee.amountBaseUnits
+              ) +
+              BigInt(
+                freshPreview.referrerFee
+                  ?.amountBaseUnits || "0"
+              )
+            ).toString(),
+            decimals: 6,
+            symbol: "USDC",
+          };
+
+          simulatedTotalCost =
+            freshPreview.totalExpectedCost;
+
+          simulatedFeeStatus =
+            freshPreview.feeStatus;
+
+          simulationMethod =
+            "THETANUTS_OPTIONBOOK_PREVIEW";
+
           isProviderCallSuccessful = true;
+
+          marketEvidenceTimestampMs =
+            freshPreview.previewTimestampMs;
         }
       } catch {
         isProviderCallSuccessful = false;
       }
     }
 
-    // 7. Cost Budget Constraint Check (Exact BigInt Base Units)
-    const budgetBaseUnits = BigInt(intent.maxPremiumUSDC.value.amountBaseUnits);
-    const totalCostBaseUnits = simulatedTotalCost ? BigInt(simulatedTotalCost.amountBaseUnits) : -1n;
-    const isCostWithinBudget = totalCostBaseUnits >= 0n && totalCostBaseUnits <= budgetBaseUnits;
+    let marketEvidenceStatus:
+      MarketEvidenceStatus = "UNAVAILABLE";
+
+    if (marketEvidenceTimestampMs > 0) {
+      const ageMs =
+        nowMs - marketEvidenceTimestampMs;
+
+      marketEvidenceStatus =
+        ageMs >= 0 &&
+          ageMs <=
+          PRODUCT_MARKET_FRESHNESS_THRESHOLD_MS
+          ? "FRESH"
+          : "STALE";
+    }
+
+    verificationChecks.push({
+      checkName: "MARKET_EVIDENCE_FRESHNESS",
+      passed:
+        marketEvidenceStatus === "FRESH",
+      details:
+        marketEvidenceStatus === "FRESH"
+          ? `Market evidence is fresh (${Math.round(
+            (nowMs -
+              marketEvidenceTimestampMs) /
+            1000
+          )}s old).`
+          : marketEvidenceStatus === "STALE"
+            ? "Market evidence is stale and should be refreshed."
+            : "Market evidence timestamp is unavailable.",
+    });
+
+    if (
+      this.marketService &&
+      candidateQuote
+    ) {
+      verificationChecks.push({
+        checkName: "FRESH_READ_ONLY_PREVIEW",
+        passed: isProviderCallSuccessful,
+        details: isProviderCallSuccessful
+          ? "Fresh Thetanuts OptionBook preview completed successfully."
+          : "Fresh Thetanuts OptionBook preview was unavailable.",
+      });
+    }
+
+    const budgetSymbol =
+      intent.maxPremiumUSDC.value.symbol.toUpperCase();
+
+    const totalCostSymbol =
+      simulatedTotalCost?.symbol.toUpperCase();
+
+    let isCostWithinBudget = false;
+
+    let totalCostBaseUnits = -1n;
+
+    let normalizedBudgetBaseUnits = 0n;
+
+    if (
+      simulatedTotalCost &&
+      totalCostSymbol === budgetSymbol
+    ) {
+      const comparisonDecimals =
+        Math.max(
+          simulatedTotalCost.decimals,
+          intent.maxPremiumUSDC.value.decimals
+        );
+
+      totalCostBaseUnits =
+        normalizeBaseUnits(
+          BigInt(
+            simulatedTotalCost.amountBaseUnits
+          ),
+          simulatedTotalCost.decimals,
+          comparisonDecimals
+        );
+
+      normalizedBudgetBaseUnits =
+        normalizeBaseUnits(
+          BigInt(
+            intent.maxPremiumUSDC.value
+              .amountBaseUnits
+          ),
+          intent.maxPremiumUSDC.value.decimals,
+          comparisonDecimals
+        );
+
+      isCostWithinBudget =
+        totalCostBaseUnits >= 0n &&
+        totalCostBaseUnits <=
+        normalizedBudgetBaseUnits;
+    }
 
     verificationChecks.push({
       checkName: "BUDGET_COMPLIANCE",
       passed: isCostWithinBudget,
-      details: isCostWithinBudget
-        ? `Simulated total cost (${Number(totalCostBaseUnits) / 1e6} USDC) is within confirmed budget (${Number(budgetBaseUnits) / 1e6} USDC).`
-        : `Cost violation: simulated cost (${totalCostBaseUnits >= 0n ? Number(totalCostBaseUnits) / 1e6 : "UNKNOWN"} USDC) exceeds budget (${Number(budgetBaseUnits) / 1e6} USDC).`,
+      details: !simulatedTotalCost
+        ? "Total protection cost is unavailable."
+        : totalCostSymbol !== budgetSymbol
+          ? `Cost denomination ${totalCostSymbol} does not match confirmed budget denomination ${budgetSymbol}.`
+          : isCostWithinBudget
+            ? "Freshly evaluated total protection cost is within the confirmed budget."
+            : "Freshly evaluated total protection cost exceeds the confirmed budget.",
     });
 
-    // 8. Protection Target Re-evaluation (Truthful spot price required, no $2400 fake default)
     let isProtectionTargetMet = false;
+
     if (spotPriceUSD <= 0) {
       verificationChecks.push({
         checkName: "PROTECTION_TARGET_RECHECK",
         passed: false,
-        details: "Live market spot price unavailable: protection payoff cannot be truthfully re-evaluated.",
+        details:
+          "Live market spot price unavailable: protection payoff cannot be truthfully re-evaluated.",
       });
     } else if (!simulatedTotalCost) {
       verificationChecks.push({
         checkName: "PROTECTION_TARGET_RECHECK",
         passed: false,
-        details: "Simulated total cost unavailable: protection payoff cannot be evaluated.",
+        details:
+          "Protection cost is unavailable, so modeled downside cannot be re-evaluated.",
       });
     } else {
-      const exposureQuantityNum = Number(BigInt(intent.exposureAmount.value.amountBaseUnits)) / 10 ** intent.exposureAmount.value.decimals;
-      const strikePriceNum = Number(BigInt(proposal.expectedStrike.amountBaseUnits)) / 10 ** proposal.expectedStrike.decimals;
-      const totalCostUSDNum = Number(BigInt(simulatedTotalCost.amountBaseUnits)) / 1e6;
+      const exposureQuantityNum =
+        Number(
+          BigInt(
+            intent.exposureAmount.value
+              .amountBaseUnits
+          )
+        ) /
+        10 **
+        intent.exposureAmount.value.decimals;
 
-      const payoff = ExposurePayoffEngine.calculate({
-        spotQuantity: exposureQuantityNum,
-        optionQuantity: exposureQuantityNum,
-        strikePriceUSD: strikePriceNum,
-        spotReferencePriceUSD: spotPriceUSD,
-        totalProtectionCostUSD: totalCostUSDNum,
-        assetSymbol: intent.asset.value,
-      });
+      const strikePriceNum =
+        Number(
+          BigInt(
+            proposal.expectedStrike
+              .amountBaseUnits
+          )
+        ) /
+        10 **
+        proposal.expectedStrike.decimals;
 
-      isProtectionTargetMet = payoff.effectiveDownsidePercent <= intent.targetMaxLossPercent.value;
+      const totalCostUSDNum =
+        Number(
+          BigInt(
+            simulatedTotalCost.amountBaseUnits
+          )
+        ) /
+        10 **
+        simulatedTotalCost.decimals;
+
+      const payoff =
+        ExposurePayoffEngine.calculate({
+          spotQuantity:
+            exposureQuantityNum,
+          optionQuantity:
+            exposureQuantityNum,
+          strikePriceUSD:
+            strikePriceNum,
+          spotReferencePriceUSD:
+            spotPriceUSD,
+          totalProtectionCostUSD:
+            totalCostUSDNum,
+          assetSymbol:
+            intent.asset.value,
+        });
+
+      isProtectionTargetMet =
+        payoff.effectiveDownsidePercent <=
+        intent.targetMaxLossPercent.value;
+
       verificationChecks.push({
         checkName: "PROTECTION_TARGET_RECHECK",
         passed: isProtectionTargetMet,
         details: isProtectionTargetMet
-          ? `Modeled downside (${payoff.effectiveDownsidePercent.toFixed(2)}%) satisfies target max loss (<= ${intent.targetMaxLossPercent.value}%).`
-          : `Protection target violation: modeled downside (${payoff.effectiveDownsidePercent.toFixed(2)}%) exceeds allowed max loss (${intent.targetMaxLossPercent.value}%).`,
+          ? `Modeled at-expiry downside (${payoff.effectiveDownsidePercent.toFixed(
+            2
+          )}%) satisfies the confirmed target (${intent.targetMaxLossPercent.value}%).`
+          : `Modeled at-expiry downside (${payoff.effectiveDownsidePercent.toFixed(
+            2
+          )}%) exceeds the confirmed target (${intent.targetMaxLossPercent.value}%).`,
       });
     }
 
-    const allPassed = verificationChecks.every((c) => c.passed);
+    const allPassed =
+      verificationChecks.every(
+        (check) => check.passed
+      );
 
     let status: SimulationResult["status"] = isProviderCallSuccessful
       ? "PROVIDER_SIMULATED"
       : "DETERMINISTIC_VERIFIED";
 
-    if (marketEvidenceStatus === "STALE") {
+    if (spotPriceUSD <= 0) {
+      status = "FAILED";
+    } else if (marketEvidenceStatus === "STALE") {
       status = "STALE";
     } else if (marketEvidenceStatus === "UNAVAILABLE") {
       status = "NOT_AVAILABLE";
-    } else if (spotPriceUSD <= 0) {
-      status = "FAILED";
     } else if (!allPassed) {
-      status = (!isCostWithinBudget || !isProtectionTargetMet) ? "SIMULATION_MISMATCH" : "FAILED";
+      status =
+        !isCostWithinBudget ||
+          !isProtectionTargetMet ||
+          !quoteBindingMatches
+          ? "SIMULATION_MISMATCH"
+          : "FAILED";
     }
 
     return {
       simulationId: `sim-${Math.random().toString(36).substring(2, 9)}`,
       proposalId: proposal.proposalId,
-      proposalDigest: proposal.proposalDigest,
+      proposalDigest:
+        proposal.proposalDigest,
       intentId: intent.intentId,
       intentVersion: intent.version,
       strategyId: proposal.strategyId,
       status,
       simulationMethod,
       chainId: proposal.chainId,
-      targetContract: proposal.targetContract,
-      bindingStatus: "PREVIEW_BOUND", // Truthful PREVIEW_BOUND
+      targetContract:
+        proposal.targetContract,
+      bindingStatus: "PREVIEW_BOUND",
       simulatedAtMs: nowMs,
       marketEvidenceTimestampMs,
       marketEvidenceStatus,
-      expectedPremium: simulatedPremium,
+      expectedPremium:
+        simulatedPremium,
       expectedFees: simulatedFees,
-      expectedTotalCost: simulatedTotalCost,
+      expectedTotalCost:
+        simulatedTotalCost,
       feeStatus: simulatedFeeStatus,
-      expectedExpiryMs: proposal.expectedExpiryMs,
-      expectedOptionQuantity: proposal.expectedQuantity,
-      expectedUnderlying: proposal.expectedAsset,
-      providerResultSummary: allPassed
-        ? `Read-only ${simulationMethod === "THETANUTS_OPTIONBOOK_PREVIEW" ? "protocol preview simulation" : "deterministic verification"} passed: parameters verified.`
-        : `Simulation check failed: ${verificationChecks.filter((c) => !c.passed).map((c) => c.details).join("; ")}`,
+      expectedExpiryMs:
+        proposal.expectedExpiryMs,
+      expectedOptionQuantity:
+        proposal.expectedQuantity,
+      expectedUnderlying:
+        proposal.expectedAsset,
+      providerResultSummary:
+        spotPriceUSD <= 0
+          ? "Simulation rejected: Live market spot price unavailable for protection target re-evaluation."
+          : allPassed
+            ? `Read-only ${simulationMethod === "THETANUTS_OPTIONBOOK_PREVIEW"
+              ? "Thetanuts protocol preview"
+              : "deterministic verification"
+            } passed.`
+            : `Simulation verification incomplete or failed: ${verificationChecks
+              .filter((check) => !check.passed)
+              .map((check) => check.details)
+              .join("; ")}`,
       verificationChecks,
       authorizedByHuman: false,
     };

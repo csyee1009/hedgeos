@@ -1,137 +1,153 @@
-# HedgeOS Technical Architecture
+# HedgeOS System Architecture
 
-## 1. Executive Summary
-HedgeOS is a Risk Intent Compiler for Thetanuts Finance on Base Mainnet (Chain ID 8453). It bridges natural language risk management and on-chain decentralized options.
+## 1. System Context
 
-### Core Architectural Principle
-> **AI interprets.**
-> **Deterministic policy verifies.**
-> **Financial authorization remains separate.**
+HedgeOS is an outcome-first Risk Intent Compiler for Thetanuts Finance. It translates natural language protection requests or portfolio balances into structured risk intents, verifies candidate strategies against a deterministic Financial Constitution, and creates cryptographic bounded authorization handoffs—all without holding private keys or executing transactions.
 
----
-
-## 2. High-Level System Architecture
-
-```mermaid
-graph TD
-    User([User]) -->|Natural Language Prompt| API[Express API Server :3000]
-    API -->|Prompt & Safe Length Check| LLMProvider[IntentProvider: Gemini 3.7 Flash]
-    LLMProvider -->|Raw Model JSON| Validator[LLMOutputValidator: Zod Schema]
-    Validator -->|Reject Unauthorized Authority Fields / Preserved Nulls| DraftRepo[(DevelopmentIntentRepository: Draft v1)]
-    User -->|Explicit Approval + expectedVersion| ConfirmRoute[Confirmation Handler]
-    ConfirmRoute -->|Confirmed Intent v1| ConfirmedRepo[(DevelopmentIntentRepository: Confirmed)]
-    ConfirmedRoute --> Solver[ProtectionSolverEngine]
-    
-    subgraph Thetanuts Protocol Layer Base Mainnet 8453
-        MarketService[ThetanutsMarketService]
-        MarketService <--> SDKClient[@thetanuts-finance/thetanuts-client]
-        SDKClient <--> OptionBook[(OptionBook Contract)]
-        SDKClient <--> PriceFeeds[(Chainlink Price Feeds)]
-        SDKClient <--> OptionFactory[(OptionFactory Contract)]
-    end
-    
-    Solver <--> MarketService
-    Solver --> Sizing[OptionSizingAdapter: 1:1 Contract Sizing]
-    Solver --> Payoff[ExposurePayoffEngine: Protected Floor Model]
-    Solver --> Constitution{FinancialConstitutionEngine: 9 Rules}
-    
-    Constitution -->|All Invariants Passed| ProposalBuilder[ActionProposalBuilder: OptionBook]
-    Constitution -->|Liquidity / Strike Mismatch| RFQBuilder[RFQSpecificationBuilder: Long Put RFQ]
-    
-    ProposalBuilder --> SHA256[SHA-256 Cryptographic Proposal Digest]
-    SHA256 --> SimService[ThetanutsSimulationService]
-    SimService -->|eth_call previewFillOrder| ReviewRecord[HumanReviewService: PREVIEW_BOUND]
-    ReviewRecord --> UIState([Client Review View: NOT_AUTHORIZED])
+```
++-----------------------------------------------------------------------------------+
+|                                 USER / CLIENT                                     |
+|              (Portfolio Address Analysis / Manual Holdings Entry)                 |
++-----------------------------------------------------------------------------------+
+                                         |
+                                         v
++-----------------------------------------------------------------------------------+
+|                            HEDGEOS API SERVER                                     |
+|  +-------------------------+  +------------------------+  +--------------------+  |
+|  | AI Interpretation Layer |  | Deterministic Solver   |  | Persistence Layer  |  |
+|  | (Gemini / Zod Parser)   |  | & Financial Invariants |  | (SQLite Database)  |  |
+|  +-------------------------+  +------------------------+  +--------------------+  |
++-----------------------------------------------------------------------------------+
+            |                                                      |
+            v                                                      v
++----------------------------------------+       +----------------------------------+
+|            THETANUTS SDK               |       |   EXTERNAL HUMAN AUTHORIZATION   |
+|   (Base Mainnet 8453 / Read-Only)      |       |             HANDOFF              |
++----------------------------------------+       | [OUTSIDE HEDGEOS TRUST BOUNDARY] |
+                                                 +----------------------------------+
 ```
 
----
+## 2. Component Diagram
 
-## 3. Trust Boundaries & Authority Separation
-
-HedgeOS enforces 4 non-overlapping trust boundaries:
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor Human as User (Human Authority)
-    participant AI as Gemini 3.7 Flash (Interpretation)
-    participant Server as HedgeOS Core (State & Validation)
-    participant Engine as Financial Constitution (Deterministic Policy)
-    participant Chain as Thetanuts Protocol (Base Mainnet)
-
-    Human->>AI: "Protect 2 ETH until Friday. Max loss 8%. Budget 3 USDC."
-    AI->>Server: Candidate JSON Draft
-    Note over Server: LLMOutputValidator strips injected authority fields
-    Server->>Human: Review Intent Draft (Missing fields flagged)
-    Human->>Server: Explicit Confirmation (expectedVersion: 1)
-    Note over Server: Intent locked to confirmedByUser = true
-
-    Server->>Chain: Query live OptionBook orders (Read-Only)
-    Chain-->>Server: Raw Orderbook Liquidity
-    Server->>Engine: Evaluate 9 Financial Invariants
-    Note over Engine: POL-001..POL-009 evaluated using exact BigInt
-
-    alt OptionBook Eligible
-        Engine-->>Server: Invariants Passed (Rank #1 Strategy)
-        Server->>Chain: Read-Only previewFillOrder
-        Chain-->>Server: Premium & Fee Preview
-        Server->>Human: Present HumanReviewRecord (PREVIEW_BOUND)
-    else OptionBook Insufficient
-        Engine-->>Server: RFQ Fallback Activated
-        Server->>Human: Present Long Put RFQ Specification (NOT_SUBMITTED)
-    end
-
-    Note over Human: Boundary: executionStatus = NOT_AUTHORIZED
+```
++-----------------------------------------------------------------------+
+|                              USER UI                                  |
+|               (Portfolio Context / Manual Holdings Input)             |
++-----------------------------------------------------------------------+
+                                   |
+                                   v
++-----------------------------------------------------------------------+
+|                        AI INTERPRETATION LAYER                        |
+|             Natural Language -> Inferred Risk Intent (Gemini)         |
++-----------------------------------------------------------------------+
+                                   |
+                                   v
++-----------------------------------------------------------------------+
+|                       HUMAN CONFIRMATION STEP                         |
+|               Explicit User Lock of Structured Risk Intent            |
++-----------------------------------------------------------------------+
+                                   |
+                                   v
++-----------------------------------------------------------------------+
+|                    DETERMINISTIC VERIFICATION LAYER                   |
+|  +-----------------------------------------------------------------+  |
+|  | Protection Solver Engine (OptionBook-First + RFQ Fallback)      |  |
+|  +-----------------------------------------------------------------+  |
+|  | Financial Constitution Engine (9 Invariants: Budget, Liquidity) |  |
+|  +-----------------------------------------------------------------+  |
+|  | Simulation Engine (Read-Only Preview & Fee Verification)        |  |
+|  +-----------------------------------------------------------------+  |
+|  | Bounded Authorization Attestation (SCOPE_ATTESTED_PREVIEW_ONLY) |  |
+|  +-----------------------------------------------------------------+  |
+|  | Execution Commitment (PROPOSAL_BOUND / Digest Hashing)          |  |
+|  +-----------------------------------------------------------------+  |
+|  | External Human Authorization Handoff (AWAITING_EXTERNAL_HUMAN)  |  |
+|  +-----------------------------------------------------------------+  |
++-----------------------------------------------------------------------+
+         |                                           |
+         v                                           v
++------------------------------------+   +-------------------------------+
+|         THETANUTS MARKET           |   |       PERSISTENCE LAYER       |
+| (Base Mainnet 8453 / Read-Only)    |   | SQLite (Intents, Receipts,    |
++------------------------------------+   | Handoffs - SHA-256 Digest)    |
+                                         +-------------------------------+
+         |                                           
+         | [Side path when liquidity unavailable]
+         v
++------------------------------------+
+|          RFQ SPECIFICATION         |
+|           (NOT SUBMITTED)          |
++------------------------------------+
 ```
 
----
+## 3. Full Data Flow
 
-## 4. Component Responsibilities
+1. **Portfolio Read / Manual Input**: The user inputs a public Base address or enters token holdings manually.
+2. **Intent Parsing**: The prompt is processed via LLM/Gemini to infer structured intent parameters (`asset`, `exposure`, `targetMaxLossPercent`, `maxPremiumUSDC`, `horizonTimestamp`).
+3. **Human Confirmation**: The user reviews and locks the structured `TypedRiskIntent` with version assignment.
+4. **Market Read**: `ThetanutsMarketService` queries live Base Mainnet (chainId 8453) OptionBook quotes via `@thetanuts-finance/thetanuts-client`.
+5. **Protection Solving & Ranking**: `ProtectionSolverEngine` filters quotes, computes exact contract sizing (`OptionSizingAdapter`), and evaluates payoff floors (`ExposurePayoffEngine`).
+6. **Financial Constitution Check**: `FinancialConstitutionEngine` evaluates 9 strict invariant policies.
+7. **Simulation & Preview**: `ThetanutsSimulationService` performs a read-only preview and fee calculation.
+8. **Action Proposal Generation**: `ActionProposalBuilder` compiles an `ActionProposal` with a SHA-256 digest.
+9. **Bounded Authorization Attestation**: `BoundedAuthorizationAttestationService` issues a scope attestation (`SCOPE_ATTESTED_PREVIEW_ONLY`).
+10. **Execution Commitment**: `ExecutionCommitmentService` creates a cryptographic `ExecutionCommitment` (`PROPOSAL_BOUND`).
+11. **External Authorization Handoff**: `ExternalHumanAuthorizationHandoffService` formats an expiring handoff package (`AWAITING_EXTERNAL_HUMAN`).
+12. **Audit Receipt & Persistence**: `AuditReceiptService` persists intent, audit receipt, and handoff in SQLite.
 
-### 4.1 AI Intent Layer (`src/providers/`, `src/services/LLMOutputValidator.ts`)
-- **Model:** Gemini 3.7 Flash (`gemini-3.7-flash`).
-- **Function:** Maps unstructured language to structured candidate intent parameters.
-- **Constraints:**
-  - Cannot confirm intents (`confirmedByUser` is strictly false).
-  - Cannot choose arbitrary numbers or default horizons.
-  - Output is strictly validated against Zod schemas; unauthorized keys are rejected.
+## 4. Trust Boundaries
 
-### 4.2 State Management (`src/repositories/IntentRepository.ts`, `src/services/ApplicationStateMachine.ts`)
-- **Storage:** In-memory repository (local hackathon prototype boundary).
-- **Version Tracking:** Material edits increment `version` and invalidate previous confirmations.
-- **Transition Guard:** `ApplicationStateMachine` rejects illegal shortcuts (e.g. `EMPTY -> REVIEW_READY`).
+- **Untrusted Zone**: User input prompts, raw HTTP headers, external web browsers.
+- **AI Boundary**: Gemini model parses and infers intent structure, but has zero financial authority.
+- **Deterministic Trust Zone**: Intent Repository, Financial Constitution, Protection Solver, Simulation Service, Bounded Authorization Attestation, SQLite Database.
+- **Protocol Read Boundary**: Base Mainnet RPC and Thetanuts OptionBook smart contracts (read-only).
+- **Execution Boundary**: External human execution system (outside HedgeOS).
 
-### 4.3 Financial Constitution (`src/services/FinancialConstitutionEngine.ts`)
-- Authoritative single evaluator enforcing 9 strict invariants:
-  1. `POL-001`: Total Cost $\le$ Max Budget Limit (exact integer base units).
-  2. `POL-002`: Target Asset matches verified underlying evidence.
-  3. `POL-003`: Protocol whitelist enforced (`THETANUTS`).
-  4. `POL-004`: Strategy right is strictly `PUT`.
-  5. `POL-005`: Intent is explicitly user-confirmed.
-  6. `POL-006`: Expiry covers protection horizon ($T_{\text{expiry}} \ge T_{\text{horizon}}$).
-  7. `POL-007`: Multi-leg permissions verified.
-  8. `POL-008`: Maker liquidity satisfies exposure.
-  9. `POL-009`: Payoff downside $\le$ Target Max Loss %.
+## 5. State Transitions
 
-### 4.4 Protocol Integration (`src/services/ThetanutsMarketService.ts`)
-- **SDK:** `@thetanuts-finance/thetanuts-client` on Base Mainnet (8453).
-- **Underlying Resolution:** Deterministic mapping via Chainlink price feeds in SDK `chainConfig`.
-- **Preview & Sizing:** Dry-run `previewFillOrder` and maker collateral calculations.
-- **Contract Resolution:** Dynamically resolves `OptionBook` and `OptionFactory` addresses.
+- **Intent**: `DRAFT` → `CONFIRMED`
+- **Proposal**: `PREPARED` → `SIMULATED` → `REVIEW_REQUIRED`
+- **Attestation**: `SCOPE_ATTESTED_PREVIEW_ONLY`
+- **Commitment**: `PROPOSAL_BOUND` → `EXTERNAL_PAYLOAD_BOUND` (or `EXPIRED` / `BLOCKED`)
+- **Handoff**: `AWAITING_EXTERNAL_HUMAN` → `CONSUMED` (or `EXPIRED` / `BLOCKED`)
+- **Execution Status**: `NOT_AUTHORIZED` (permanently invariant)
 
-### 4.5 RFQ Fallback Engine (`src/services/RFQSpecificationBuilder.ts`)
-- Triggered automatically when OptionBook liquidity cannot fulfill the user's intent.
-- Builds a custom Long Put RFQ specification targeting `OptionFactory`.
-- Maintains honest unpriced status (`PENDING_RFQ_PRICING_REFINEMENT`) without fabricated numbers.
+## 6. Digest & Binding Relationships
 
-### 4.6 Simulation & Review Boundary (`src/services/HumanReviewService.ts`)
-- Cryptographically binds proposals using SHA-256 digests over material parameters.
-- Assigns binding status strictly as `PREVIEW_BOUND`.
-- Discloses Time-of-Check to Time-of-Use (TOCTOU) risks.
-- Locks execution status to `NOT_AUTHORIZED` with `ELIGIBLE_HUMAN_REQUIRED`.
+```
+TypedRiskIntent (sha256 digest)
+   │
+   ├─► ActionProposal (sha256 proposalDigest)
+   │      │
+   │      ├─► SimulationResult (sha256 binding)
+   │      │      │
+   │      │      └─► BoundedAuthorizationAttestation (sha256 attestationDigest)
+   │      │             │
+   │      │             └─► ExecutionCommitment (sha256 commitmentDigest)
+   │      │                    │
+   │      │                    └─► ExternalHumanAuthorizationHandoff (sha256 requestDigest)
+   │      │                           │
+   └──────┴───────────────────────────┴─► Immutable AuditReceipt (sha256 receiptDigest)
+```
 
----
+## 7. Market Evidence Flow
 
-## 5. Deployment Boundary & Scope
-- **Hackathon Architecture:** Built as a local, single-demo-user hackathon prototype.
-- **Execution Segregation:** Intentionally excludes wallet connect, private key management, signing, and on-chain broadcasting.
+Market quotes are fetched live from Thetanuts OptionBook contracts on Base Mainnet. Each quote includes pricing, available contracts, expiry, and timestamp. If evidence is older than 5 minutes or chainId !== 8453, the market evidence status is marked `STALE` or `UNAVAILABLE`, causing the Financial Constitution and Bounded Authorization Attestation to fail closed.
+
+## 8. Persistence
+
+All domain records are persisted to SQLite using `node:sqlite`:
+- `intents`: Stores drafts and versioned confirmed intents.
+- `audit_receipts`: Stores immutable receipt records and digests.
+- `authorization_handoffs`: Stores external human authorization handoffs and statuses.
+
+## 9. Failure Modes
+
+- **Liquidity Mismatch**: If OptionBook liquidity cannot satisfy the confirmed goal, the solver outputs an RFQ specification marked `NOT_SUBMITTED`.
+- **Budget Exceeded**: If quote premium exceeds `maxPremiumUSDC`, the Financial Constitution rejects the proposal.
+- **Stale Quote**: If market evidence expires, attestation status transitions to `REJECTED` or `BLOCKED`.
+- **RPC Outage**: If Base RPC fails, ReadOnlyPortfolioService produces partial results without fabricating zero balances.
+
+## 10. Execution Boundary
+
+HedgeOS operates strictly up to the generation of the `ExternalHumanAuthorizationHandoff`. It does not contain private keys, signers, or transaction submission paths. Any transaction execution must be performed by a separate, authorized external system.

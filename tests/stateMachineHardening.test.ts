@@ -194,13 +194,13 @@ describe("Prompt 8 Repair: State Machine Hardening, API Defenses & Async Race Gu
 
   // 8. Request Body Size Limit (16KB)
   it("Repair 8: Oversized JSON payload (>16KB) is rejected with HTTP 413", async () => {
-    const hugePrompt = "A".repeat(20 * 1024); // 20KB
+    const hugePrompt = "A".repeat(70 * 1024); // 70KB (>64KB limit)
     const res = await request(app)
       .post("/api/v1/intents/parse")
       .send({ prompt: hugePrompt });
 
     expect(res.status).toBe(413);
-    expect(res.body.code).toBe("PAYLOAD_TOO_LARGE");
+    expect(res.body.code || res.body.errorCode).toBe("PAYLOAD_TOO_LARGE");
   });
 
   // 9. Rate Limiter Memory Hygiene & Periodic Expiration

@@ -74,6 +74,12 @@ export class ActionProposalBuilder {
     candidate: CandidateStrategy,
     marketService?: ThetanutsMarketService
   ): ActionProposal {
+    if (!intent.confirmedByUser) {
+      throw new Error(
+        "Cannot build action proposal: Intent has not been explicitly confirmed by user."
+      );
+    }
+
     const quote = candidate.quotes[0];
     const leg = candidate.legs[0];
     const nowMs = Date.now();
@@ -164,6 +170,7 @@ export class ActionProposalBuilder {
       actionType: "OPTIONBOOK_FILL_ORDER",
       targetContract,
       normalizedParameters: {
+        strategyType: candidate.strategyType,
         quoteId: quote.quoteId,
         orderIndex: quote.orderIndex,
         makerAddress: quote.makerAddress,
@@ -202,6 +209,12 @@ export class ActionProposalBuilder {
     rfqSpec: RFQSpecification,
     marketService?: ThetanutsMarketService
   ): ActionProposal {
+    if (!intent.confirmedByUser) {
+      throw new Error(
+        "Cannot build RFQ proposal: Intent has not been explicitly confirmed by user."
+      );
+    }
+
     const nowMs = Date.now();
     const primaryStrike = rfqSpec.strikes[0] || {
       amountBaseUnits: "0",
@@ -260,7 +273,10 @@ export class ActionProposalBuilder {
       expectedExpiryMs: rfqSpec.expiryTimestampMs,
       boundQuoteId: rfqSpec.rfqSpecId,
       proposalCreatedAtMs: nowMs,
-      proposalStatus: rfqSpec.validationStatus === "VALID" ? "PREPARED" : "INCOMPLETE",
+      proposalStatus:
+        rfqSpec.validationStatus === "VALID" && targetContract
+          ? "PREPARED"
+          : "INCOMPLETE",
       bindingStatus: "PREVIEW_BOUND",
       proposalDigest: digest,
       authorizationStatus: "UNAUTHORIZED",

@@ -14,44 +14,114 @@ import { HumanReviewService } from "../services/HumanReviewService";
 import { ProtectionSolverEngine } from "../services/ProtectionSolverEngine";
 import { ThetanutsMarketService } from "../services/ThetanutsMarketService";
 import { ThetanutsSimulationService } from "../services/ThetanutsSimulationService";
+import { BoundedAuthorizationAttestationService } from "../services/BoundedAuthorizationAttestationService";
+import { ExecutionCommitmentService } from "../services/ExecutionCommitmentService";
+import { ExternalHumanAuthorizationHandoffService } from "../services/ExternalHumanAuthorizationHandoffService";
+import { AuditReceiptService } from "../services/AuditReceiptService";
+import { ReadOnlyPortfolioService } from "../services/ReadOnlyPortfolioService";
+import { SqliteDatabase } from "../repositories/SqliteDatabase";
+import { SqliteIntentRepository } from "../repositories/SqliteIntentRepository";
+import { AuditReceiptRepository } from "../repositories/AuditReceiptRepository";
+import { AuthorizationHandoffRepository } from "../repositories/AuthorizationHandoffRepository";
+import { IntentRepository } from "../repositories/IntentRepository";
 import { ActionProposal, StoredIntent, TypedRiskIntent } from "../types";
 import { parseExactDecimal, validateBudgetAmount, validateExposureAmount, validateHorizonTimestamp, validateLossPercent } from "../utils/decimalParser";
 
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
+import { requestIdMiddleware } from "./middleware/requestId";
+import { requestLoggerMiddleware, redactSensitiveText } from "./middleware/requestLogger";
+
 const app = express();
-app.use(cors());
+
+app.use(requestIdMiddleware);
+app.use(requestLoggerMiddleware);
+app.use(helmet({ contentSecurityPolicy: false }));
+
+const allowedOriginsEnv = process.env.HEDGEOS_ALLOWED_ORIGINS;
+const isProd = process.env.NODE_ENV === "production";
+
+let allowedOrigins: string[] = [];
+if (allowedOriginsEnv) {
+  allowedOrigins = allowedOriginsEnv.split(",").map((s) => s.trim()).filter(Boolean);
+} else if (!isProd) {
+  allowedOrigins = ["http://localhost:5173", "http://127.0.0.1:5173"];
+}
+
+if (isProd && allowedOrigins.length === 0) {
+  console.error("FATAL: HEDGEOS_ALLOWED_ORIGINS must be configured in production.");
+  process.exit(1);
+}
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+      return callback(new Error("CORS origin not allowed"));
+    },
+  })
+);
+
 // JSON replacer to serialize BigInt fields as string
 app.set("json replacer", (_key: string, value: any) => (typeof value === "bigint" ? value.toString() : value));
-// Middleware: Request body size limit (16KB)
-app.use(express.json({ limit: "16kb" }));
+// Middleware: Request body size limit (64KB)
+app.use(express.json({ limit: "64kb" }));
 
 // Handle JSON body limit / syntax errors gracefully
 app.use((err: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
   if (err && (err.type === "entity.too.large" || err.status === 413)) {
     return res.status(413).json({
-      error: "Request payload too large. Maximum permitted body size is 16KB.",
+      error: "Request payload too large. Maximum permitted body size is 64KB.",
       code: "PAYLOAD_TOO_LARGE",
+      errorCode: "PAYLOAD_TOO_LARGE",
     });
   }
   if (err && err.status === 400 && "body" in err) {
     return res.status(400).json({
       error: "Malformed JSON payload in request.",
       code: "MALFORMED_JSON",
+      errorCode: "MALFORMED_JSON",
     });
   }
   next(err);
 });
 
-const intentRepository = new DevelopmentIntentRepository();
+// Centralized Rate Limiters
+const rateLimitHandler = (req: express.Request, res: express.Response) => {
+  return sendSafeError(res, 429, "RATE_LIMITED", "Too many requests. Please try again shortly.");
+};
+
+export const generalLimiter = rateLimit({ windowMs: 10 * 60 * 1000, max: 300, handler: rateLimitHandler });
+export const parseLimiter = rateLimit({ windowMs: 10 * 60 * 1000, max: 30, handler: rateLimitHandler });
+export const portfolioLimiter = rateLimit({ windowMs: 10 * 60 * 1000, max: 60, handler: rateLimitHandler });
+export const solveLimiter = rateLimit({ windowMs: 10 * 60 * 1000, max: 30, handler: rateLimitHandler });
+export const simulateLimiter = rateLimit({ windowMs: 10 * 60 * 1000, max: 30, handler: rateLimitHandler });
+
+app.use("/api/", generalLimiter);
+
+let sqliteDb: SqliteDatabase;
+try {
+  sqliteDb = new SqliteDatabase();
+} catch (err: any) {
+  if (process.env.NODE_ENV === "production") {
+    console.error("FATAL: Failed to initialize SQLite database in production environment.", err);
+    process.exit(1);
+  }
+  throw err;
+}
+
+const intentRepository: IntentRepository = new SqliteIntentRepository(sqliteDb);
+const auditReceiptRepository = new AuditReceiptRepository(sqliteDb);
+const authorizationHandoffRepository = new AuthorizationHandoffRepository(sqliteDb);
 const marketService = new ThetanutsMarketService();
 const solverEngine = new ProtectionSolverEngine(marketService);
 
-// Centralized error sanitizer and responder
 export function sanitizeErrorMessage(err: any): string {
   const msg = typeof err === "string" ? err : err?.message || "Internal server error";
-  return msg
-    .replace(/AIza[0-9A-Za-z-_]{20,}/g, "[REDACTED_API_KEY]")
-    .replace(/Bearer\s+[A-Za-z0-9-_.]+/g, "Bearer [REDACTED_TOKEN]")
-    .replace(/https?:\/\/[^\s/$.?#].[^\s]*/gi, "[REDACTED_URL]");
+  return redactSensitiveText(msg);
 }
 
 export function sendSafeError(
@@ -61,11 +131,49 @@ export function sendSafeError(
   userMessage: string,
   _internalErr?: any
 ) {
+  (res as any).locals = (res as any).locals || {};
+  (res as any).locals.errorCode = code;
+
+  const requestId = (res.req as any)?.requestId;
+  const sanitized = redactSensitiveText(userMessage);
+
   return res.status(statusCode).json({
-    error: userMessage,
+    error: sanitized,
     code,
+    errorCode: code,
+    ...(requestId ? { requestId } : {}),
   });
 }
+
+// Liveness endpoint
+app.get("/healthz", (_req, res) => {
+  res.json({
+    status: "ok",
+    service: "hedgeos",
+    timestampMs: Date.now(),
+  });
+});
+
+// Readiness endpoint
+app.get("/readyz", (_req, res) => {
+  const dbAlive = sqliteDb.ping();
+  const llmConfigured = Boolean(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY);
+  const baseRpcConfigured = Boolean(process.env.BASE_RPC_URL);
+  const thetanutsConfigured = true;
+
+  const isReady = dbAlive;
+  const statusCode = isReady ? 200 : 503;
+
+  res.status(statusCode).json({
+    status: isReady ? "ready" : "not_ready",
+    checks: {
+      database: dbAlive ? "READY" : "FAILED",
+      llm: llmConfigured ? "CONFIGURED" : "NOT_CONFIGURED",
+      baseRpc: baseRpcConfigured ? "CONFIGURED" : "NOT_CONFIGURED",
+      thetanuts: thetanutsConfigured ? "CONFIGURED" : "NOT_CONFIGURED",
+    },
+  });
+});
 
 // Helper to compute missing fields on a draft/intent
 export function computeMissingFields(intent: StoredIntent): string[] {
@@ -132,6 +240,12 @@ export function clearRateLimitCache() {
 const ParseIntentRequestSchema = z
   .object({
     prompt: z.string().min(1, "Prompt cannot be empty").max(MAX_PROMPT_LENGTH, `Prompt exceeds maximum of ${MAX_PROMPT_LENGTH} characters`),
+  })
+  .strict();
+
+const AnalyzePortfolioRequestSchema = z
+  .object({
+    address: z.string().min(1, "Address cannot be empty"),
   })
   .strict();
 
@@ -203,6 +317,55 @@ app.get("/api/v1/market/status", async (_req, res) => {
 app.get("/api/v1/ai/status", (_req, res) => {
   const summary = IntentProviderFactory.getProviderStatusSummary();
   res.json(summary);
+});
+
+// Endpoint: POST /api/v1/portfolio/analyze
+app.post("/api/v1/portfolio/analyze", async (req, res) => {
+  try {
+    const clientIp = req.ip || req.socket.remoteAddress || "127.0.0.1";
+    if (!checkRateLimit(clientIp)) {
+      return sendSafeError(res, 429, "RATE_LIMIT_EXCEEDED", "Rate limit exceeded. Please wait a moment before sending additional requests.");
+    }
+
+    const validation = AnalyzePortfolioRequestSchema.safeParse(req.body);
+    if (!validation.success) {
+      const errMsg = validation.error.issues.map((i) => i.message).join("; ");
+      return sendSafeError(res, 400, "INVALID_ADDRESS", errMsg);
+    }
+
+    const { address } = validation.data;
+    const portfolioService = new ReadOnlyPortfolioService();
+
+    if (!portfolioService.validateAddress(address)) {
+      return sendSafeError(
+        res,
+        400,
+        "INVALID_ADDRESS",
+        "Invalid EVM address format. Must be 0x followed by 40 hexadecimal characters."
+      );
+    }
+
+    const snapshot = await portfolioService.analyzePortfolio(address);
+
+    if (snapshot.status === "UNAVAILABLE") {
+      return sendSafeError(
+        res,
+        503,
+        "PORTFOLIO_UNAVAILABLE",
+        "Base Mainnet portfolio reads are currently unavailable."
+      );
+    }
+
+    res.json(snapshot);
+  } catch (err: any) {
+    return sendSafeError(
+      res,
+      503,
+      "PORTFOLIO_ANALYSIS_FAILED",
+      "Failed to read balances from Base Mainnet.",
+      err
+    );
+  }
 });
 
 // Endpoint 1: POST /api/v1/intents/parse
@@ -543,6 +706,57 @@ app.post("/api/v1/intents/:id/solve", async (req, res) => {
 
     const responseMode = isServerDemoSnapshotMode ? "RECORDED_DEMO_SNAPSHOT" : pipelineResult.mode;
 
+    const authorizationAttestation =
+      pipelineResult.actionProposal &&
+      pipelineResult.simulationResult &&
+      pipelineResult.humanReviewRecord
+        ? BoundedAuthorizationAttestationService.createScopeAttestation(
+            confirmedIntent,
+            pipelineResult.actionProposal,
+            pipelineResult.simulationResult,
+            pipelineResult.humanReviewRecord
+          )
+        : undefined;
+
+    const executionCommitment =
+      authorizationAttestation &&
+      pipelineResult.actionProposal &&
+      pipelineResult.simulationResult
+        ? ExecutionCommitmentService.createCommitment(
+            confirmedIntent,
+            pipelineResult.actionProposal,
+            pipelineResult.simulationResult,
+            authorizationAttestation
+          )
+        : undefined;
+
+    const externalHumanAuthorizationHandoff =
+      authorizationAttestation && executionCommitment
+        ? ExternalHumanAuthorizationHandoffService.createHandoff(
+            confirmedIntent,
+            authorizationAttestation,
+            executionCommitment
+          )
+        : undefined;
+
+    if (externalHumanAuthorizationHandoff) {
+      await authorizationHandoffRepository.save(externalHumanAuthorizationHandoff);
+    }
+
+    const auditReceipt = AuditReceiptService.createReceipt({
+      intent: confirmedIntent,
+      selectedStrategy: pipelineResult.rankedStrategies[0],
+      policyDecisions: pipelineResult.policyDecisions,
+      actionProposal: pipelineResult.actionProposal,
+      simulationResult: pipelineResult.simulationResult,
+      humanReviewRecord: pipelineResult.humanReviewRecord,
+      authorizationAttestation,
+      executionCommitment,
+      externalHumanAuthorizationHandoff,
+    });
+
+    await auditReceiptRepository.save(auditReceipt);
+
     res.json({
       intentId: confirmedIntent.intentId,
       mode: responseMode,
@@ -553,6 +767,10 @@ app.post("/api/v1/intents/:id/solve", async (req, res) => {
       actionProposal: pipelineResult.actionProposal,
       simulationResult: pipelineResult.simulationResult,
       humanReviewRecord: pipelineResult.humanReviewRecord,
+      authorizationAttestation,
+      executionCommitment,
+      externalHumanAuthorizationHandoff,
+      auditReceipt,
       policyDecisions: pipelineResult.policyDecisions,
       marketState: isServerDemoSnapshotMode
         ? { ...marketState, status: "DEMO_SNAPSHOT" }
@@ -562,6 +780,46 @@ app.post("/api/v1/intents/:id/solve", async (req, res) => {
     });
   } catch (err: any) {
     return sendSafeError(res, 500, "SOLVER_FAILED", "Failed to solve protection options.", err);
+  }
+});
+
+// Endpoint: GET /api/v1/audit/:receiptId
+app.get("/api/v1/audit/:receiptId", async (req, res) => {
+  try {
+    const receipt = await auditReceiptRepository.findById(req.params.receiptId);
+    if (!receipt) {
+      return sendSafeError(
+        res,
+        404,
+        "AUDIT_RECEIPT_NOT_FOUND",
+        `Audit receipt with ID '${req.params.receiptId}' not found.`
+      );
+    }
+    res.json(receipt);
+  } catch (err: any) {
+    return sendSafeError(
+      res,
+      500,
+      "AUDIT_FETCH_FAILED",
+      "Failed to retrieve audit receipt.",
+      err
+    );
+  }
+});
+
+// Endpoint: GET /api/v1/intents/:intentId/audit
+app.get("/api/v1/intents/:intentId/audit", async (req, res) => {
+  try {
+    const receipts = await auditReceiptRepository.findByIntentId(req.params.intentId);
+    res.json(receipts);
+  } catch (err: any) {
+    return sendSafeError(
+      res,
+      500,
+      "AUDIT_FETCH_FAILED",
+      "Failed to retrieve audit receipts for intent.",
+      err
+    );
   }
 });
 

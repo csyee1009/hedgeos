@@ -27,7 +27,7 @@ export const HumanReviewCard: React.FC<HumanReviewCardProps> = ({
       <div className="card-header">
         <div className="review-status-pill-row">
           <span className={`badge ${isSimPassed ? "badge-success" : "badge-warning"}`}>
-            {isSimPassed ? "✓ Read-Only Preview Verified" : "Review Pending"}
+            {isSimPassed ? "Ready for human review" : "Review Pending"}
           </span>
           <span className="badge badge-danger">Execution: Not Authorized</span>
         </div>

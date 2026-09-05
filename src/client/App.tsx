@@ -1,10 +1,17 @@
-import React, { useEffect, useState } from "react";
+import React, {
+  useEffect,
+  useState,
+} from "react";
 import {
   ActionProposal,
+  BoundedAuthorizationAttestation,
   CandidateStrategy,
+  ExecutionCommitment,
+  ExternalHumanAuthorizationHandoff,
   HumanReviewRecord,
   MarketStateRecord,
   PolicyDecisionRecord,
+  RFQReasonCode,
   RFQRequirementStatus,
   RFQSpecification,
   SimulationResult,
@@ -15,6 +22,7 @@ import { CandidateList } from "./components/CandidateList";
 import { ConfirmedIntentView } from "./components/ConfirmedIntentView";
 import { IntentReview } from "./components/IntentReview";
 import { OutcomeInput } from "./components/OutcomeInput";
+import { PortfolioOnboarding } from "./components/PortfolioOnboarding";
 
 export type UIState =
   | "EMPTY"
@@ -26,223 +34,586 @@ export type UIState =
   | "SOLVED"
   | "ERROR";
 
+export type EntryMode = "ONBOARDING" | "ADDRESS" | "MANUAL";
+
+const normalizeAmbiguities = (
+  value: unknown
+): string[] => {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((item) => {
+      if (typeof item === "string") {
+        return item;
+      }
+
+      if (
+        item &&
+        typeof item === "object"
+      ) {
+        const ambiguity =
+          item as Record<
+            string,
+            unknown
+          >;
+
+        const detectedText =
+          typeof ambiguity.detectedText ===
+            "string"
+            ? ambiguity.detectedText
+            : "";
+
+        const reason =
+          typeof ambiguity.reason ===
+            "string"
+            ? ambiguity.reason
+            : "";
+
+        if (
+          detectedText &&
+          reason
+        ) {
+          return `"${detectedText}" — ${reason}`;
+        }
+
+        if (reason) {
+          return reason;
+        }
+      }
+
+      return "";
+    })
+    .filter(
+      (item): item is string =>
+        Boolean(item)
+    );
+};
+
 export default function App() {
-  const [theme, setTheme] = useState<"dark" | "light">(() => {
-    const saved = localStorage.getItem("hedgeos-theme");
-    if (saved === "light" || saved === "dark") return saved;
-    return window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches
-      ? "light"
-      : "dark";
-  });
+  const [theme, setTheme] =
+    useState<"dark" | "light">(
+      () => {
+        const saved =
+          localStorage.getItem(
+            "hedgeos-theme"
+          );
 
-  const [promptText, setPromptText] = useState(
-    "I have 2 ETH. Protect me until Friday. I don't want to lose more than 8%. Maximum protection budget 15 USDC."
-  );
-  const [uiState, setUiState] = useState<UIState>("EMPTY");
-  const [intent, setIntent] = useState<StoredIntent | null>(null);
-  const [missingFields, setMissingFields] = useState<string[]>([]);
-  const [ambiguities, setAmbiguities] = useState<string[]>([]);
-  const [errorMessage, setErrorMessage] = useState<string | undefined>(undefined);
-  const [isSubmitting, setIsSubmitting] = useState(false);
+        if (
+          saved === "light" ||
+          saved === "dark"
+        ) {
+          return saved;
+        }
 
-  // Market & Protection Solver State
-  const [marketState, setMarketState] = useState<MarketStateRecord | undefined>(undefined);
-  const [candidates, setCandidates] = useState<CandidateStrategy[]>([]);
-  const [rejectedCandidates, setRejectedCandidates] = useState<CandidateStrategy[]>([]);
-  const [solverMode, setSolverMode] = useState<"OPTIONBOOK_AVAILABLE" | "RFQ_REQUIRED">("OPTIONBOOK_AVAILABLE");
-  const [rfqRequirement, setRfqRequirement] = useState<{
-    status: RFQRequirementStatus;
-    reasons: any[];
-    explanation: string;
-  } | undefined>(undefined);
-  const [rfqSpecification, setRfqSpecification] = useState<RFQSpecification | undefined>(undefined);
-  const [actionProposal, setActionProposal] = useState<ActionProposal | undefined>(undefined);
-  const [simulationResult, setSimulationResult] = useState<SimulationResult | undefined>(undefined);
-  const [humanReviewRecord, setHumanReviewRecord] = useState<HumanReviewRecord | undefined>(undefined);
-  const [policyDecisions, setPolicyDecisions] = useState<Record<string, PolicyDecisionRecord>>({});
-  const [isSolving, setIsSolving] = useState(false);
+        return window.matchMedia &&
+          window.matchMedia(
+            "(prefers-color-scheme: light)"
+          ).matches
+          ? "light"
+          : "dark";
+      }
+    );
 
-  // AI Intent Provider State
-  const [aiStatus, setAiStatus] = useState<{
-    activeProviderName: string;
-    realProviderStatus: string;
-    realModel: string;
-  } | null>(null);
+  const [entryMode, setEntryMode] = useState<EntryMode>("ONBOARDING");
+  const [sourceNotice, setSourceNotice] = useState<string | undefined>(undefined);
 
-  // Apply Theme to DOM
+  const [
+    promptText,
+    setPromptText,
+  ] = useState("");
+
+  const [uiState, setUiState] =
+    useState<UIState>("EMPTY");
+
+  const [intent, setIntent] =
+    useState<StoredIntent | null>(
+      null
+    );
+
+  const [
+    missingFields,
+    setMissingFields,
+  ] = useState<string[]>([]);
+
+  const [
+    ambiguities,
+    setAmbiguities,
+  ] = useState<string[]>([]);
+
+  const [
+    errorMessage,
+    setErrorMessage,
+  ] = useState<
+    string | undefined
+  >(undefined);
+
+  const [
+    isSubmitting,
+    setIsSubmitting,
+  ] = useState(false);
+
+  const [
+    marketState,
+    setMarketState,
+  ] = useState<
+    MarketStateRecord | undefined
+  >(undefined);
+
+  const [
+    candidates,
+    setCandidates,
+  ] = useState<
+    CandidateStrategy[]
+  >([]);
+
+  const [
+    rejectedCandidates,
+    setRejectedCandidates,
+  ] = useState<
+    CandidateStrategy[]
+  >([]);
+
+  const [
+    solverMode,
+    setSolverMode,
+  ] = useState<
+    | "OPTIONBOOK_AVAILABLE"
+    | "RFQ_REQUIRED"
+  >("OPTIONBOOK_AVAILABLE");
+
+  const [
+    rfqRequirement,
+    setRfqRequirement,
+  ] = useState<
+    | {
+      status: RFQRequirementStatus;
+      reasons: RFQReasonCode[];
+      explanation: string;
+    }
+    | undefined
+  >(undefined);
+
+  const [
+    rfqSpecification,
+    setRfqSpecification,
+  ] = useState<
+    RFQSpecification | undefined
+  >(undefined);
+
+  const [
+    actionProposal,
+    setActionProposal,
+  ] = useState<
+    ActionProposal | undefined
+  >(undefined);
+
+  const [
+    simulationResult,
+    setSimulationResult,
+  ] = useState<
+    SimulationResult | undefined
+  >(undefined);
+
+  const [
+    humanReviewRecord,
+    setHumanReviewRecord,
+  ] = useState<
+    HumanReviewRecord | undefined
+  >(undefined);
+
+  const [
+    authorizationAttestation,
+    setAuthorizationAttestation,
+  ] = useState<
+    BoundedAuthorizationAttestation | undefined
+  >(undefined);
+
+  const [
+    executionCommitment,
+    setExecutionCommitment,
+  ] = useState<
+    ExecutionCommitment | undefined
+  >(undefined);
+
+  const [
+    externalHumanAuthorizationHandoff,
+    setExternalHumanAuthorizationHandoff,
+  ] = useState<
+    ExternalHumanAuthorizationHandoff | undefined
+  >(undefined);
+
+  const [
+    policyDecisions,
+    setPolicyDecisions,
+  ] = useState<
+    Record<
+      string,
+      PolicyDecisionRecord
+    >
+  >({});
+
+  const [
+    isSolving,
+    setIsSolving,
+  ] = useState(false);
+
   useEffect(() => {
-    document.documentElement.setAttribute("data-theme", theme);
-    localStorage.setItem("hedgeos-theme", theme);
+    document.documentElement.setAttribute(
+      "data-theme",
+      theme
+    );
+
+    localStorage.setItem(
+      "hedgeos-theme",
+      theme
+    );
   }, [theme]);
 
   const toggleTheme = () => {
-    setTheme((prev) => (prev === "dark" ? "light" : "dark"));
+    setTheme((previous) =>
+      previous === "dark"
+        ? "light"
+        : "dark"
+    );
   };
 
-  // Query Market & AI Status on Mount
   useEffect(() => {
     fetch("/api/v1/market/status")
-      .then((res) => res.json())
-      .then((data) => setMarketState(data))
-      .catch(() => {});
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error();
+        }
 
-    fetch("/api/v1/ai/status")
-      .then((res) => res.json())
-      .then((data) => setAiStatus(data))
-      .catch(() => {});
+        return response.json();
+      })
+      .then((data) =>
+        setMarketState(data)
+      )
+      .catch(() => {
+        setMarketState(undefined);
+      });
   }, []);
 
-  // Action 1: Parse Natural Language Intent
   const handleParse = async () => {
-    if (!promptText.trim()) return;
+    if (!promptText.trim()) {
+      return;
+    }
+
     setUiState("PARSING");
     setErrorMessage(undefined);
 
     try {
-      const res = await fetch("/api/v1/intents/parse", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: promptText }),
-      });
+      const response = await fetch(
+        "/api/v1/intents/parse",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type":
+              "application/json",
+          },
+          body: JSON.stringify({
+            prompt: promptText,
+          }),
+        }
+      );
 
-      if (!res.ok) {
-        const errData = await res.json();
-        throw new Error(errData.error || "Failed to interpret protection request.");
+      const data =
+        await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data.error ||
+          "Failed to interpret protection request."
+        );
       }
 
-      const data = await res.json();
-
-      if (data.unsupportedObjective) {
+      if (
+        data.unsupportedObjective
+      ) {
         setErrorMessage(
           data.unsupportedObjectiveReason ||
-            "HedgeOS currently specializes in Downside Protection intents. Speculation and yield strategies are not supported in this version."
+          "HedgeOS currently supports downside-protection goals only."
         );
+
         setUiState("ERROR");
         return;
       }
 
-      setIntent(data.candidateDraft);
-      setMissingFields(data.missingFields || []);
-      setAmbiguities(data.ambiguitiesFound || []);
+      setIntent(
+        data.candidateDraft
+      );
 
-      if (data.requiresClarification) {
-        setUiState("NEEDS_CLARIFICATION");
+      setMissingFields(
+        data.missingFields || []
+      );
+
+      setAmbiguities(
+        normalizeAmbiguities(
+          data.ambiguitiesFound
+        )
+      );
+
+      if (
+        data.requiresClarification
+      ) {
+        setUiState(
+          "NEEDS_CLARIFICATION"
+        );
       } else {
-        setUiState("READY_FOR_CONFIRMATION");
+        setUiState(
+          "READY_FOR_CONFIRMATION"
+        );
       }
-    } catch (err: any) {
-      setErrorMessage("We couldn't interpret your protection goal right now. Please try again.");
+    } catch {
+      setErrorMessage(
+        "We couldn't interpret your protection goal right now. Please try again."
+      );
+
       setUiState("ERROR");
     }
   };
 
-  // Action 2: Edit/Update Intent Parameter (PATCH /api/v1/intents/:id)
-  const handleUpdateIntent = async (updates: {
-    asset?: string;
-    exposureAmount?: { amount: string };
-    targetMaxLossPercent?: number;
-    maxPremiumUSDC?: { amount: string };
-    horizonTimestampMs?: number;
-    allowMultiLeg?: boolean;
-  }) => {
-    if (!intent) return;
-    setIsSubmitting(true);
-    setErrorMessage(undefined);
-
-    try {
-      const res = await fetch(`/api/v1/intents/${intent.intentId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(updates),
-      });
-
-      if (!res.ok) {
-        const errData = await res.json();
-        throw new Error(errData.error || "Failed to update protection parameter.");
+  const handleUpdateIntent =
+    async (updates: {
+      asset?: string;
+      exposureAmount?: {
+        amount: string;
+      };
+      targetMaxLossPercent?: number;
+      maxPremiumUSDC?: {
+        amount: string;
+      };
+      horizonTimestampMs?: number;
+      allowMultiLeg?: boolean;
+    }) => {
+      if (!intent) {
+        return;
       }
 
-      const data = await res.json();
-      setIntent(data.candidateIntent);
-      setMissingFields(data.missingFields || []);
+      setIsSubmitting(true);
+      setErrorMessage(undefined);
 
-      if (data.missingFields && data.missingFields.length > 0) {
-        setUiState("NEEDS_CLARIFICATION");
-      } else {
-        setUiState("READY_FOR_CONFIRMATION");
+      try {
+        const response =
+          await fetch(
+            `/api/v1/intents/${intent.intentId}`,
+            {
+              method: "PATCH",
+              headers: {
+                "Content-Type":
+                  "application/json",
+              },
+              body: JSON.stringify(
+                updates
+              ),
+            }
+          );
+
+        const data =
+          await response.json();
+
+        if (!response.ok) {
+          throw new Error(
+            data.error ||
+            "Failed to update protection goal."
+          );
+        }
+
+        setIntent(
+          data.candidateIntent
+        );
+
+        setMissingFields(
+          data.missingFields || []
+        );
+
+        setAmbiguities(
+          normalizeAmbiguities(
+            data.ambiguitiesFound
+          )
+        );
+
+        if (
+          data.missingFields?.length >
+          0
+        ) {
+          setUiState(
+            "NEEDS_CLARIFICATION"
+          );
+        } else {
+          setUiState(
+            "READY_FOR_CONFIRMATION"
+          );
+        }
+      } catch (error: any) {
+        setErrorMessage(
+          error.message ||
+          "Failed to update protection goal."
+        );
+      } finally {
+        setIsSubmitting(false);
       }
-    } catch (err: any) {
-      setErrorMessage(err.message || "Failed to update protection parameter.");
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
+    };
 
-  // Action 3: Confirm Protection Goal (POST /api/v1/intents/:id/confirm)
-  const handleConfirmIntent = async () => {
-    if (!intent) return;
-    setIsSubmitting(true);
-    setErrorMessage(undefined);
-
-    try {
-      const res = await fetch(`/api/v1/intents/${intent.intentId}/confirm`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ expectedVersion: intent.version }),
-      });
-
-      if (!res.ok) {
-        const errData = await res.json();
-        throw new Error(errData.error || "Failed to confirm protection goal.");
+  const handleConfirmIntent =
+    async () => {
+      if (!intent) {
+        return;
       }
 
-      const data = await res.json();
-      setIntent(data.confirmedIntent);
-      setUiState("CONFIRMED");
-    } catch (err: any) {
-      setErrorMessage(err.message || "Failed to confirm protection goal.");
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
+      setIsSubmitting(true);
+      setErrorMessage(undefined);
 
-  // Action 4: Solve Live Protection Options (POST /api/v1/intents/:id/solve)
-  const handleSolveProtection = async () => {
-    if (!intent || !intent.confirmedByUser) return;
-    setIsSolving(true);
-    setErrorMessage(undefined);
+      try {
+        const response =
+          await fetch(
+            `/api/v1/intents/${intent.intentId}/confirm`,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type":
+                  "application/json",
+              },
+              body: JSON.stringify({
+                expectedVersion:
+                  intent.version,
+              }),
+            }
+          );
 
-    try {
-      const res = await fetch(`/api/v1/intents/${intent.intentId}/solve`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-      });
+        const data =
+          await response.json();
 
-      if (!res.ok) {
-        const errData = await res.json();
-        throw new Error(errData.error || "Failed to discover live protection options.");
+        if (!response.ok) {
+          throw new Error(
+            data.error ||
+            "Failed to confirm protection goal."
+          );
+        }
+
+        setIntent(
+          data.confirmedIntent
+        );
+
+        setUiState("CONFIRMED");
+      } catch (error: any) {
+        setErrorMessage(
+          error.message ||
+          "Failed to confirm protection goal."
+        );
+      } finally {
+        setIsSubmitting(false);
+      }
+    };
+
+  const handleSolveProtection =
+    async () => {
+      if (
+        !intent ||
+        !intent.confirmedByUser
+      ) {
+        return;
       }
 
-      const data = await res.json();
-      setSolverMode(data.mode || "OPTIONBOOK_AVAILABLE");
-      setCandidates(data.rankedStrategies || []);
-      setRejectedCandidates(data.rejectedCandidates || []);
-      setRfqRequirement(data.rfqRequirement);
-      setRfqSpecification(data.rfqSpecification);
-      setActionProposal(data.actionProposal);
-      setSimulationResult(data.simulationResult);
-      setHumanReviewRecord(data.humanReviewRecord);
-      setPolicyDecisions(data.policyDecisions || {});
-      if (data.marketState) setMarketState(data.marketState);
+      setIsSolving(true);
+      setErrorMessage(undefined);
 
-      setUiState("SOLVED");
-    } catch (err: any) {
-      setErrorMessage(err.message || "Failed to discover live protection options.");
-    } finally {
-      setIsSolving(false);
-    }
-  };
+      try {
+        const response =
+          await fetch(
+            `/api/v1/intents/${intent.intentId}/solve`,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type":
+                  "application/json",
+              },
+            }
+          );
+
+        const data =
+          await response.json();
+
+        if (!response.ok) {
+          throw new Error(
+            data.error ||
+            "Failed to check live protection options."
+          );
+        }
+
+        setSolverMode(
+          data.mode ||
+          "OPTIONBOOK_AVAILABLE"
+        );
+
+        setCandidates(
+          data.rankedStrategies || []
+        );
+
+        setRejectedCandidates(
+          data.rejectedCandidates ||
+          []
+        );
+
+        setRfqRequirement(
+          data.rfqRequirement
+        );
+
+        setRfqSpecification(
+          data.rfqSpecification
+        );
+
+        setActionProposal(
+          data.actionProposal
+        );
+
+        setSimulationResult(
+          data.simulationResult
+        );
+
+        setHumanReviewRecord(
+          data.humanReviewRecord
+        );
+
+        setAuthorizationAttestation(
+          data.authorizationAttestation
+        );
+
+        setExecutionCommitment(
+          data.executionCommitment
+        );
+
+        setExternalHumanAuthorizationHandoff(
+          data.externalHumanAuthorizationHandoff
+        );
+
+        setPolicyDecisions(
+          data.policyDecisions || {}
+        );
+
+        if (data.marketState) {
+          setMarketState(
+            data.marketState
+          );
+        }
+
+        setUiState("SOLVED");
+      } catch (error: any) {
+        setErrorMessage(
+          error.message ||
+          "Failed to check live protection options."
+        );
+
+        setUiState("CONFIRMED");
+      } finally {
+        setIsSolving(false);
+      }
+    };
 
   const handleReset = () => {
+    setPromptText("");
     setIntent(null);
     setMissingFields([]);
     setAmbiguities([]);
@@ -255,41 +626,100 @@ export default function App() {
     setActionProposal(undefined);
     setSimulationResult(undefined);
     setHumanReviewRecord(undefined);
+    setAuthorizationAttestation(undefined);
+    setExecutionCommitment(undefined);
+    setExternalHumanAuthorizationHandoff(undefined);
+    setSolverMode(
+      "OPTIONBOOK_AVAILABLE"
+    );
     setUiState("EMPTY");
+    setEntryMode("ONBOARDING");
+    setSourceNotice(undefined);
   };
 
-  const isLiveMarket = marketState?.status === "LIVE_READ_AVAILABLE";
+  const isLiveMarket =
+    marketState?.status ===
+    "LIVE_READ_AVAILABLE";
+
+  const marketLabel =
+    marketState?.status === "LIVE_READ_AVAILABLE"
+      ? "Live Base Mainnet"
+      : marketState?.status === "CONNECTING"
+        ? "Connecting"
+        : marketState?.status === "NOT_CONFIGURED"
+          ? "Market not connected"
+          : "Live market unavailable";
+
+  const currentStep = !intent
+    ? 1
+    : uiState === "NEEDS_CLARIFICATION" || uiState === "READY_FOR_CONFIRMATION"
+      ? 2
+      : uiState === "CONFIRMED" || isSolving
+        ? 3
+        : 4;
+
+  const currentStepLabel =
+    currentStep === 1
+      ? "Define goal"
+      : currentStep === 2
+        ? "Review"
+        : currentStep === 3
+          ? "Market check"
+          : "Result";
 
   return (
     <div className="app-layout">
-      {/* Header Bar */}
       <header className="app-header">
         <div className="header-container">
           <div className="brand-box">
-            <span className="brand-logo">🛡️ HedgeOS</span>
-            <span className="brand-tagline">Protect outcomes, not instruments.</span>
+            <span className="brand-logo">
+              🛡️ HedgeOS
+            </span>
+
+            <span className="brand-tagline">
+              Protect outcomes, not
+              instruments.
+            </span>
           </div>
 
           <div className="header-controls">
             <div className="header-badges">
-              <span className={`status-badge ${isLiveMarket ? "live" : "neutral"}`}>
-                <span className={`live-dot ${isLiveMarket ? "active" : "failed"}`}>●</span>
-                {isLiveMarket ? "Live Base Mainnet (8453)" : "Market Unavailable"}
+              <span
+                className={`status-badge ${isLiveMarket
+                  ? "live"
+                  : "neutral"
+                  }`}
+              >
+                <span
+                  className={`live-dot ${isLiveMarket
+                    ? "active"
+                    : "failed"
+                    }`}
+                >
+                  ●
+                </span>
+
+                {marketLabel}
               </span>
 
               <span className="status-badge neutral">
-                Thetanuts OptionBook & RFQ
+                Thetanuts
               </span>
             </div>
 
-            {/* Theme Toggle */}
             <button
               type="button"
               className="theme-toggle-btn"
               onClick={toggleTheme}
-              title={`Switch to ${theme === "dark" ? "Light" : "Dark"} mode`}
+              title={`Switch to ${theme === "dark"
+                ? "Light"
+                : "Dark"
+                } mode`}
+              aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
             >
-              {theme === "dark" ? "☀️ Light" : "🌙 Dark"}
+              {theme === "dark"
+                ? "☀️ Light"
+                : "🌙 Dark"}
             </button>
 
             {intent && (
@@ -298,101 +728,237 @@ export default function App() {
                 className="btn btn-secondary btn-sm"
                 onClick={handleReset}
               >
-                Reset Plan
+                Start New Plan
               </button>
             )}
           </div>
         </div>
       </header>
 
-      {/* Main Content Area */}
       <main className="main-content">
         <div className="content-container">
-          {/* Error Banner */}
-          {uiState === "ERROR" && errorMessage && (
-            <div className="alert alert-danger" role="alert">
+          <div className="journey-progress-mobile" aria-label={`Step ${currentStep} of 4: ${currentStepLabel}`}>
+            <span className="journey-progress-mobile-count">Step {currentStep} of 4</span>
+            <span className="journey-progress-mobile-label">{currentStepLabel}</span>
+          </div>
+
+          <div className="journey-progress-bar" aria-label="Protection planning progress">
+            <div className={`progress-step ${currentStep >= 1 ? "completed" : ""} ${currentStep === 1 ? "active" : ""}`}>
+              <span className="step-num">{currentStep > 1 ? "✓" : "1"}</span>
+              <span className="step-label">Define goal</span>
+            </div>
+            <span className="progress-connector">→</span>
+            <div className={`progress-step ${currentStep >= 2 ? "completed" : ""} ${currentStep === 2 ? "active" : ""}`}>
+              <span className="step-num">{currentStep > 2 ? "✓" : "2"}</span>
+              <span className="step-label">Review</span>
+            </div>
+            <span className="progress-connector">→</span>
+            <div className={`progress-step ${currentStep >= 3 ? "completed" : ""} ${currentStep === 3 ? "active" : ""}`}>
+              <span className="step-num">{currentStep > 3 ? "✓" : "3"}</span>
+              <span className="step-label">Market check</span>
+            </div>
+            <span className="progress-connector">→</span>
+            <div className={`progress-step ${currentStep >= 4 ? "completed" : ""} ${currentStep === 4 ? "active" : ""}`}>
+              <span className="step-num">4</span>
+              <span className="step-label">Result</span>
+            </div>
+          </div>
+          {errorMessage && (
+            <div
+              className="alert alert-danger"
+              role="alert"
+            >
               <div>
-                <strong>Notice:</strong> {errorMessage}
+                <strong>
+                  Notice:
+                </strong>{" "}
+                {errorMessage}
               </div>
-              <div style={{ display: "flex", gap: "0.5rem" }}>
-                <button
-                  type="button"
-                  className="btn btn-primary btn-sm"
-                  onClick={handleParse}
+
+              {!intent && (
+                <div
+                  style={{
+                    display:
+                      "flex",
+                    gap: "0.5rem",
+                  }}
                 >
-                  Try Again
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-secondary btn-sm"
-                  onClick={handleReset}
-                >
-                  Start Over
-                </button>
-              </div>
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-sm"
+                    onClick={
+                      handleParse
+                    }
+                  >
+                    Try Again
+                  </button>
+
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    onClick={
+                      handleReset
+                    }
+                  >
+                    Start Over
+                  </button>
+                </div>
+              )}
             </div>
           )}
 
-          {/* Outcome Input Section (Landing / Primary Screen / Error State) */}
-          {(!intent && (uiState === "EMPTY" || uiState === "PARSING" || uiState === "ERROR")) && (
-            <OutcomeInput
-              promptText={promptText}
-              setPromptText={setPromptText}
-              onParse={handleParse}
-              isParsing={uiState === "PARSING"}
-            />
-          )}
+          {!intent &&
+            (uiState ===
+              "EMPTY" ||
+              uiState ===
+              "PARSING" ||
+              uiState ===
+              "ERROR") && (
+              <>
+                {entryMode === "ONBOARDING" && uiState === "EMPTY" ? (
+                  <PortfolioOnboarding
+                    onSelectManual={() => setEntryMode("MANUAL")}
+                    onSelectPrefilledAmount={(prompt, notice) => {
+                      setPromptText(prompt);
+                      setSourceNotice(notice);
+                      setEntryMode("MANUAL");
+                    }}
+                  />
+                ) : (
+                  <OutcomeInput
+                    promptText={promptText}
+                    setPromptText={setPromptText}
+                    onParse={handleParse}
+                    isParsing={uiState === "PARSING"}
+                    sourceNotice={sourceNotice}
+                    onResetOnboarding={() => {
+                      setEntryMode("ONBOARDING");
+                      setSourceNotice(undefined);
+                    }}
+                  />
+                )}
+              </>
+            )}
 
-          {/* Intent Review & Confirmation Section */}
-          {intent && (uiState === "NEEDS_CLARIFICATION" || uiState === "READY_FOR_CONFIRMATION") && (
-            <IntentReview
-              intent={intent}
-              missingFields={missingFields}
-              ambiguities={ambiguities}
-              onUpdateIntent={handleUpdateIntent}
-              onConfirmIntent={handleConfirmIntent}
-              isSubmitting={isSubmitting}
-              errorMessage={errorMessage}
-            />
-          )}
+          {intent &&
+            (uiState ===
+              "NEEDS_CLARIFICATION" ||
+              uiState ===
+              "READY_FOR_CONFIRMATION") && (
+              <IntentReview
+                intent={intent}
+                missingFields={
+                  missingFields
+                }
+                ambiguities={
+                  ambiguities
+                }
+                onUpdateIntent={
+                  handleUpdateIntent
+                }
+                onConfirmIntent={
+                  handleConfirmIntent
+                }
+                isSubmitting={
+                  isSubmitting
+                }
+                errorMessage={
+                  errorMessage
+                }
+              />
+            )}
 
-          {/* Confirmed Intent View */}
-          {intent && uiState === "CONFIRMED" && (
-            <ConfirmedIntentView
-              intent={intent as TypedRiskIntent}
-              onCheckLiveMarket={handleSolveProtection}
-              onReset={handleReset}
-              isSolving={isSolving}
-            />
-          )}
+          {intent &&
+            uiState ===
+            "CONFIRMED" && (
+              <ConfirmedIntentView
+                intent={
+                  intent as TypedRiskIntent
+                }
+                onCheckLiveMarket={
+                  handleSolveProtection
+                }
+                onReset={
+                  handleReset
+                }
+                isSolving={
+                  isSolving
+                }
+              />
+            )}
 
-          {/* Solved Protection Options & RFQ Fallback Section */}
-          {intent && intent.confirmedByUser && uiState === "SOLVED" && (
-            <CandidateList
-              intent={intent as TypedRiskIntent}
-              mode={solverMode}
-              candidates={candidates}
-              rejectedCandidates={rejectedCandidates}
-              rfqRequirement={rfqRequirement}
-              rfqSpecification={rfqSpecification}
-              actionProposal={actionProposal}
-              simulationResult={simulationResult}
-              humanReviewRecord={humanReviewRecord}
-              policyDecisions={policyDecisions}
-              marketState={marketState}
-              isSolving={isSolving}
-              onReset={handleReset}
-              onRefresh={handleSolveProtection}
-            />
-          )}
+          {intent &&
+            intent.confirmedByUser &&
+            uiState ===
+            "SOLVED" && (
+              <CandidateList
+                intent={
+                  intent as TypedRiskIntent
+                }
+                mode={
+                  solverMode
+                }
+                candidates={
+                  candidates
+                }
+                rejectedCandidates={
+                  rejectedCandidates
+                }
+                rfqRequirement={
+                  rfqRequirement
+                }
+                rfqSpecification={
+                  rfqSpecification
+                }
+                actionProposal={
+                  actionProposal
+                }
+                simulationResult={
+                  simulationResult
+                }
+                humanReviewRecord={
+                  humanReviewRecord
+                }
+                authorizationAttestation={
+                  authorizationAttestation
+                }
+                executionCommitment={
+                  executionCommitment
+                }
+                externalHumanAuthorizationHandoff={
+                  externalHumanAuthorizationHandoff
+                }
+                policyDecisions={
+                  policyDecisions
+                }
+                marketState={
+                  marketState
+                }
+                isSolving={
+                  isSolving
+                }
+                onReset={
+                  handleReset
+                }
+                onRefresh={
+                  handleSolveProtection
+                }
+              />
+            )}
         </div>
       </main>
 
-      {/* Footer Bar */}
       <footer className="app-footer">
         <div className="footer-container">
-          <span>HedgeOS • Risk Intent Compiler for Thetanuts Finance (Base Mainnet 8453)</span>
-          <span>Pre-Execution Boundary: <code>ELIGIBLE_HUMAN_REQUIRED</code></span>
+          <span>
+            HedgeOS • Risk Intent
+            Compiler for Thetanuts
+            Finance
+          </span>
+
+          <span>
+            Read-only protection preview • No transaction submitted
+          </span>
         </div>
       </footer>
     </div>

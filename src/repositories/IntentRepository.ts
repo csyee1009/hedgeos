@@ -3,6 +3,7 @@ import { ParsedRiskIntentDraft, TypedRiskIntent } from "../types";
 export type StoredIntent = ParsedRiskIntentDraft | TypedRiskIntent;
 
 export interface IntentRepository {
+  readonly storageType?: string;
   save(intent: StoredIntent): Promise<StoredIntent>;
   findById(intentId: string): Promise<StoredIntent | null>;
   update(intent: StoredIntent): Promise<StoredIntent>;
