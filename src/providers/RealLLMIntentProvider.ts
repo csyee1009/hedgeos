@@ -1,25 +1,16 @@
-import dns from "dns";
-dns.setDefaultResultOrder("ipv4first");
-import "dotenv/config";
-import { LLMOutputValidator } from "../services/LLMOutputValidator";
-import { LLMProviderMetadata, LLMProviderStatus, LLMProviderType } from "../types";
-import { AIIntentProvider, ParseResult } from "./interfaces/AIIntentProvider";
 import {
-  buildIntentExtractionUserPrompt,
-  INTENT_EXTRACTION_SYSTEM_PROMPT,
+  AIIntentProvider,
+  ParseResult,
+} from "./interfaces/AIIntentProvider";
+import {
   PROMPT_VERSION,
 } from "./prompts/intentExtractionPrompt";
-
-export interface RealLLMConfig {
-  provider?: "gemini" | "openai" | "openrouter" | "generic";
-  apiKey?: string;
-  model?: string;
-  baseUrl?: string;
-  maxRetries?: number;
-  timeoutMs?: number;
-  retryBaseDelayMs?: number;
-  maxRetryDelayMs?: number;
-}
+import {
+  LLMProviderMetadata,
+} from "../types";
+import {
+  LLMOutputValidator,
+} from "../services/LLMOutputValidator";
 
 export type AIProviderErrorCode =
   | "RATE_LIMITED"
@@ -30,280 +21,1074 @@ export type AIProviderErrorCode =
   | "INVALID_PROVIDER_OUTPUT"
   | "PROVIDER_UNAVAILABLE";
 
+export interface RealLLMIntentProviderConfig {
+  provider?: string;
+  apiKey?: string;
+  model?: string;
+  maxRetries?: number;
+  retryBaseDelayMs?: number;
+  maxRetryDelayMs?: number;
+  requestTimeoutMs?: number;
+}
+
 export class AIProviderError extends Error {
+  public readonly code: AIProviderErrorCode;
+  public readonly statusCode?: number;
+  public readonly retryable: boolean;
+
   constructor(
-    public readonly code: AIProviderErrorCode,
+    code: AIProviderErrorCode,
     message: string,
-    public readonly retryable: boolean,
-    public readonly retryAfterMs?: number,
+    statusCode?: number,
+    retryable?: boolean
   ) {
     super(`${code}: ${message}`);
     this.name = "AIProviderError";
+    this.code = code;
+    this.statusCode = statusCode;
+    this.retryable =
+      retryable ??
+      (
+        code === "RATE_LIMITED" ||
+        code === "TIMEOUT" ||
+        code === "PROVIDER_UNAVAILABLE"
+      );
   }
 }
 
-export class RealLLMIntentProvider implements AIIntentProvider {
-  public readonly adapterName = "REAL_LLM" as const;
-  public readonly providerType: LLMProviderType = "REAL_LLM";
+interface OpenAIResponsePayload {
+  id?: string;
+  model?: string;
+  output_text?: string;
+  output?: Array<{
+    type?: string;
+    content?: Array<{
+      type?: string;
+      text?: string;
+    }>;
+  }>;
+  error?: {
+    message?: string;
+    type?: string;
+    code?: string;
+  };
+}
 
-  private providerVendor: "gemini" | "openai" | "openrouter" | "generic";
-  private apiKey: string;
-  private model: string;
-  private baseUrl?: string;
-  private maxRetries: number;
-  private timeoutMs: number;
-  private retryBaseDelayMs: number;
-  private maxRetryDelayMs: number;
-
-  constructor(config?: RealLLMConfig) {
-    const envApiKey = (
-      process.env.LLM_API_KEY ||
-      process.env.GEMINI_API_KEY ||
-      process.env.OPENAI_API_KEY ||
-      process.env.OPENROUTER_API_KEY ||
-      ""
-    ).trim();
-    const envProvider = (
-      process.env.LLM_PROVIDER ||
-      (process.env.GEMINI_API_KEY ? "gemini" : process.env.OPENAI_API_KEY ? "openai" : "gemini")
-    )
-      .toLowerCase()
-      .trim() as RealLLMConfig["provider"];
-
-    this.providerVendor = config?.provider || envProvider || "gemini";
-    this.apiKey = (config?.apiKey || envApiKey).trim();
-    this.model = (
-      config?.model ||
-      process.env.LLM_MODEL?.trim() ||
-      (this.providerVendor === "gemini" ? "gemini-3.7-flash" : "gpt-4o-mini")
-    ).trim();
-    this.baseUrl = config?.baseUrl?.trim();
-    this.maxRetries = config?.maxRetries ?? 2;
-    this.timeoutMs = config?.timeoutMs ?? 15_000;
-    this.retryBaseDelayMs = config?.retryBaseDelayMs ?? 1_000;
-    this.maxRetryDelayMs = config?.maxRetryDelayMs ?? 8_000;
-  }
-
-  public getStatus(): LLMProviderStatus {
-    return this.apiKey.trim() === "" ? "NOT_CONFIGURED" : "READY";
-  }
-
-  public getModelIdentifier(): string {
-    return `${this.providerVendor}:${this.model}`;
-  }
-
-  public async parseNaturalLanguage(prompt: string): Promise<ParseResult> {
-    const requestTimestampMs = Date.now();
-    if (this.getStatus() === "NOT_CONFIGURED") {
-      throw new AIProviderError("AUTHENTICATION_FAILED", "AI intent parsing is not configured.", false);
-    }
-
-    let lastError: AIProviderError | undefined;
-    for (let retryCount = 0; retryCount <= this.maxRetries; retryCount += 1) {
-      try {
-        const rawJsonText = await this.callLLMWithTimeout(prompt);
-        const responseTimestampMs = Date.now();
-        let parsedJson: unknown;
-        try {
-          let cleanJsonStr = rawJsonText.trim();
-          if (cleanJsonStr.startsWith("```")) {
-            cleanJsonStr = cleanJsonStr.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "");
-          }
-          parsedJson = JSON.parse(cleanJsonStr);
-        } catch {
-          throw new AIProviderError("INVALID_PROVIDER_OUTPUT", "The model response was not valid JSON.", false);
-        }
-
-        const metadata: LLMProviderMetadata = {
-          providerType: "REAL_LLM",
-          status: "AVAILABLE",
-          modelIdentifier: this.getModelIdentifier(),
-          promptVersion: PROMPT_VERSION,
-          latencyMs: responseTimestampMs - requestTimestampMs,
-          requestTimestampMs,
-          responseTimestampMs,
-          retryCount,
-        };
-
-        let validated: ReturnType<typeof LLMOutputValidator.validateAndNormalize>;
-        try {
-          validated = LLMOutputValidator.validateAndNormalize(parsedJson, prompt, metadata);
-        } catch (error) {
-          const message = error instanceof Error ? error.message : "Schema validation failed.";
-          throw new AIProviderError(
-            "INVALID_PROVIDER_OUTPUT",
-            message.replace(/^INVALID_PROVIDER_OUTPUT:\s*/, ""),
-            false,
-          );
-        }
-
-        return {
-          adapterName: this.adapterName,
-          candidateDraft: validated.candidateDraft,
-          ambiguitiesFound: validated.ambiguitiesFound,
-          missingFields: validated.missingFields,
-          requiresClarification: validated.requiresClarification,
-          unsupportedObjective: validated.unsupportedObjective,
-          unsupportedObjectiveReason: validated.unsupportedObjectiveReason,
-          providerMetadata: metadata,
-        };
-      } catch (error) {
-        lastError = this.normalizeProviderError(error);
-        if (!lastError.retryable || retryCount >= this.maxRetries) break;
-        if (lastError.retryAfterMs !== undefined && lastError.retryAfterMs > this.maxRetryDelayMs) break;
-        const waitMs = Math.min(
-          this.maxRetryDelayMs,
-          Math.max(this.retryBaseDelayMs * 2 ** retryCount, lastError.retryAfterMs ?? 0),
-        );
-        if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
-      }
-    }
-
-    throw lastError ?? new AIProviderError("PROVIDER_UNAVAILABLE", "The AI intent provider request failed.", true);
-  }
-
-  private async callLLMWithTimeout(prompt: string): Promise<string> {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), this.timeoutMs);
-    try {
-      return this.providerVendor === "gemini"
-        ? await this.callGemini(prompt, controller.signal)
-        : await this.callOpenAICompatible(prompt, controller.signal);
-    } catch (error) {
-      if (controller.signal.aborted || (error instanceof Error && error.name === "AbortError")) {
-        throw new AIProviderError("TIMEOUT", "The AI intent provider request timed out.", true);
-      }
-      if (error instanceof AIProviderError) throw error;
-      if (error instanceof TypeError) {
-        throw new AIProviderError("PROVIDER_UNAVAILABLE", "The AI intent provider could not be reached.", true);
-      }
-      throw error;
-    } finally {
-      clearTimeout(timeoutId);
-    }
-  }
-
-  private async callGemini(prompt: string, signal: AbortSignal): Promise<string> {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:generateContent?key=${this.apiKey}`;
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        system_instruction: { parts: [{ text: INTENT_EXTRACTION_SYSTEM_PROMPT }] },
-        contents: [{ parts: [{ text: buildIntentExtractionUserPrompt(prompt) }] }],
-        generationConfig: { response_mime_type: "application/json" },
-      }),
-      signal,
-    });
-    if (!response.ok) throw await this.classifyHttpFailure(response, "Gemini");
-
-    const data = await response.json() as {
-      candidates?: Array<{ content?: { parts?: Array<{ text?: unknown }> } }>;
+interface GeminiResponsePayload {
+  candidates?: Array<{
+    content?: {
+      parts?: Array<{
+        text?: string;
+      }>;
     };
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (typeof text !== "string" || text.trim() === "") {
-      throw new AIProviderError("INVALID_PROVIDER_OUTPUT", "Gemini returned no text content.", false);
-    }
-    return text;
+  }>;
+  error?: {
+    code?: number;
+    message?: string;
+    status?: string;
+  };
+}
+
+const OPENAI_RESPONSES_URL =
+  "https://api.openai.com/v1/responses";
+
+const DEFAULT_OPENAI_MODEL =
+  "gpt-5.6-luna";
+
+const DEFAULT_TIMEOUT_MS =
+  15_000;
+
+const DEFAULT_MAX_RETRIES =
+  2;
+
+const DEFAULT_RETRY_BASE_DELAY_MS =
+  250;
+
+const DEFAULT_MAX_RETRY_DELAY_MS =
+  2_000;
+
+const SYSTEM_INSTRUCTIONS = `
+You are the untrusted natural-language extraction layer for HedgeOS.
+
+Your ONLY job is to extract factual risk-intent fields from the user's text.
+You do NOT recommend a financial product.
+You do NOT choose a strike, expiry, premium, option side, order, or protocol action.
+You do NOT authorize, sign, submit, broadcast, or approve any transaction.
+You do NOT invent missing financial limits.
+You do NOT convert inferred values into user-stated facts.
+
+Return exactly one JSON object and nothing else.
+Do not use markdown fences.
+
+Allowed top-level keys only:
+- objective
+- unsupportedObjectiveReason
+- asset
+- exposureAmount
+- targetMaxLossPercent
+- maxPremium
+- horizon
+- allowMultiLeg
+- ambiguities
+- clarificationQuestions
+
+Expected shape:
+{
+  "objective": "DOWNSIDE_PROTECTION" | "UNSUPPORTED_OBJECTIVE" | null,
+  "unsupportedObjectiveReason": string | null,
+  "asset": {
+    "value": string | null,
+    "evidence": string | null
+  } | null,
+  "exposureAmount": {
+    "value": string | null,
+    "unit": string | null,
+    "evidence": string | null
+  } | null,
+  "targetMaxLossPercent": {
+    "value": string | number | null,
+    "evidence": string | null
+  } | null,
+  "maxPremium": {
+    "value": string | null,
+    "currency": string | null,
+    "evidence": string | null
+  } | null,
+  "horizon": {
+    "rawText": string | null,
+    "evidence": string | null
+  } | null,
+  "allowMultiLeg": {
+    "value": boolean | null,
+    "evidence": string | null
+  } | null,
+  "ambiguities": string[],
+  "clarificationQuestions": string[]
+}
+
+Grounding rules:
+1. Evidence must be copied from the user's own text. Never fabricate evidence.
+2. If a value was not stated clearly enough, use null and add an ambiguity or clarification question.
+3. Never invent targetMaxLossPercent or maxPremium.
+4. Only set allowMultiLeg=true when the user explicitly permits a spread or multi-leg structure.
+5. If the user's objective is speculation, leverage, yield generation, arbitrage, or an autonomous trading bot rather than downside protection, set objective to "UNSUPPORTED_OBJECTIVE" and explain briefly.
+6. Preserve the user's horizon wording in horizon.rawText instead of inventing a calendar date.
+7. Never output any authority/control fields such as confirmedByUser, confirmedAtMs, authorizationStatus, submissionStatus, walletAddress, approvalAmount, calldata, signature, signedData, privateKey, targetContract, policyDecision, version, or allowedProtocols.
+`.trim();
+
+function sleep(
+  ms: number
+): Promise<void> {
+  if (
+    !Number.isFinite(ms) ||
+    ms <= 0
+  ) {
+    return Promise.resolve();
   }
 
-  private async callOpenAICompatible(prompt: string, signal: AbortSignal): Promise<string> {
-    const endpoint = this.baseUrl || (this.providerVendor === "openrouter"
-      ? "https://openrouter.ai/api/v1/chat/completions"
-      : "https://api.openai.com/v1/chat/completions");
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.apiKey}` },
-      body: JSON.stringify({
-        model: this.model,
-        messages: [
-          { role: "system", content: INTENT_EXTRACTION_SYSTEM_PROMPT },
-          { role: "user", content: buildIntentExtractionUserPrompt(prompt) },
-        ],
-        response_format: { type: "json_object" },
-        temperature: 0.1,
-      }),
-      signal,
-    });
-    if (!response.ok) throw await this.classifyHttpFailure(response, "AI provider");
+  return new Promise(
+    (resolve) =>
+      setTimeout(
+        resolve,
+        ms
+      )
+  );
+}
 
-    const data = await response.json() as { choices?: Array<{ message?: { content?: unknown } }> };
-    const text = data.choices?.[0]?.message?.content;
-    if (typeof text !== "string" || text.trim() === "") {
-      throw new AIProviderError("INVALID_PROVIDER_OUTPUT", "The AI provider returned no response content.", false);
-    }
-    return text;
+function extractJsonObject(
+  text: string
+): unknown {
+  let cleaned =
+    text.trim();
+
+  if (
+    cleaned.startsWith("```") &&
+    cleaned.endsWith("```")
+  ) {
+    cleaned =
+      cleaned
+        .replace(
+          /^```(?:json)?\s*/i,
+          ""
+        )
+        .replace(
+          /\s*```$/,
+          ""
+        )
+        .trim();
   }
 
-  private normalizeProviderError(error: unknown): AIProviderError {
-    if (error instanceof AIProviderError) return error;
-    const message = error instanceof Error ? error.message : String(error);
-    const knownCodes: AIProviderErrorCode[] = [
-      "RATE_LIMITED", "TIMEOUT", "AUTHENTICATION_FAILED", "MODEL_UNAVAILABLE",
-      "INVALID_REQUEST", "INVALID_PROVIDER_OUTPUT", "PROVIDER_UNAVAILABLE",
-    ];
-    const code = knownCodes.find((candidate) => message.startsWith(`${candidate}:`));
-    if (code) {
-      return new AIProviderError(
-        code,
-        message.slice(code.length + 1).trim() || "The provider request failed.",
-        code === "RATE_LIMITED" || code === "TIMEOUT" || code === "PROVIDER_UNAVAILABLE",
+  try {
+    return JSON.parse(
+      cleaned
+    );
+  } catch {
+    const start =
+      cleaned.indexOf(
+        "{"
+      );
+
+    const end =
+      cleaned.lastIndexOf(
+        "}"
+      );
+
+    if (
+      start >= 0 &&
+      end > start
+    ) {
+      try {
+        return JSON.parse(
+          cleaned.slice(
+            start,
+            end + 1
+          )
+        );
+      } catch {
+        throw new AIProviderError(
+          "INVALID_PROVIDER_OUTPUT",
+          "The AI provider returned text that was not valid JSON.",
+          undefined,
+          false
+        );
+      }
+    }
+
+    throw new AIProviderError(
+      "INVALID_PROVIDER_OUTPUT",
+      "The AI provider returned text that was not valid JSON.",
+      undefined,
+      false
+    );
+  }
+}
+
+function extractOpenAIText(
+  payload: OpenAIResponsePayload
+): string {
+  if (
+    typeof payload.output_text ===
+    "string" &&
+    payload.output_text.trim()
+  ) {
+    return payload
+      .output_text
+      .trim();
+  }
+
+  const pieces:
+    string[] = [];
+
+  for (
+    const item of
+    payload.output || []
+  ) {
+    for (
+      const content of
+      item.content || []
+    ) {
+      if (
+        content.type ===
+        "output_text" &&
+        typeof content.text ===
+        "string"
+      ) {
+        pieces.push(
+          content.text
+        );
+      }
+    }
+  }
+
+  return pieces
+    .join("\n")
+    .trim();
+}
+
+function extractGeminiText(
+  payload: GeminiResponsePayload
+): string {
+  return (
+    payload
+      .candidates?.[0]
+      ?.content
+      ?.parts?.[0]
+      ?.text ||
+    ""
+  ).trim();
+}
+
+function sanitizeProviderMessage(
+  message: unknown
+): string {
+  if (
+    typeof message !==
+    "string" ||
+    !message.trim()
+  ) {
+    return "AI provider request failed.";
+  }
+
+  return message
+    .replace(
+      /sk-[A-Za-z0-9_-]+/g,
+      "[REDACTED_OPENAI_KEY]"
+    )
+    .replace(
+      /AIza[0-9A-Za-z-_]{20,}/g,
+      "[REDACTED_API_KEY]"
+    )
+    .slice(
+      0,
+      300
+    );
+}
+
+function classifyHttpFailure(
+  status: number,
+  message: string
+): AIProviderError {
+  if (
+    status === 401 ||
+    status === 403
+  ) {
+    return new AIProviderError(
+      "AUTHENTICATION_FAILED",
+      message,
+      status,
+      false
+    );
+  }
+
+  if (
+    status === 429
+  ) {
+    return new AIProviderError(
+      "RATE_LIMITED",
+      message,
+      status,
+      true
+    );
+  }
+
+  if (
+    status === 404
+  ) {
+    return new AIProviderError(
+      "MODEL_UNAVAILABLE",
+      message,
+      status,
+      false
+    );
+  }
+
+  if (
+    status === 400
+  ) {
+    return new AIProviderError(
+      "INVALID_REQUEST",
+      message,
+      status,
+      false
+    );
+  }
+
+  if (
+    status === 408
+  ) {
+    return new AIProviderError(
+      "TIMEOUT",
+      message,
+      status,
+      true
+    );
+  }
+
+  if (
+    status >= 500
+  ) {
+    return new AIProviderError(
+      "PROVIDER_UNAVAILABLE",
+      message,
+      status,
+      true
+    );
+  }
+
+  return new AIProviderError(
+    "PROVIDER_UNAVAILABLE",
+    message,
+    status,
+    false
+  );
+}
+
+export class RealLLMIntentProvider
+  implements AIIntentProvider {
+  public readonly adapterName =
+    "REAL_LLM" as const;
+
+  public readonly providerType =
+    "REAL_LLM" as const;
+
+  private readonly provider:
+    string;
+
+  private readonly apiKey:
+    string;
+
+  private readonly model:
+    string;
+
+  private readonly maxRetries:
+    number;
+
+  private readonly retryBaseDelayMs:
+    number;
+
+  private readonly maxRetryDelayMs:
+    number;
+
+  private readonly requestTimeoutMs:
+    number;
+
+  constructor(
+    configOrApiKey:
+      RealLLMIntentProviderConfig |
+      string =
+      {
+        provider:
+          "openai",
+        apiKey:
+          process.env
+            .OPENAI_API_KEY ||
+          "",
+        model:
+          process.env
+            .LLM_MODEL ||
+          DEFAULT_OPENAI_MODEL,
+      },
+    legacyModel?:
+      string
+  ) {
+    const config:
+      RealLLMIntentProviderConfig =
+      typeof configOrApiKey ===
+        "string"
+        ? {
+          provider:
+            "openai",
+          apiKey:
+            configOrApiKey,
+          model:
+            legacyModel ||
+            process.env
+              .LLM_MODEL ||
+            DEFAULT_OPENAI_MODEL,
+        }
+        : configOrApiKey;
+
+    this.provider =
+      (
+        config.provider ||
+        "openai"
+      )
+        .trim()
+        .toLowerCase();
+
+    this.apiKey =
+      (
+        config.apiKey ||
+        (
+          this.provider ===
+            "openai"
+            ? process.env
+              .OPENAI_API_KEY
+            : process.env
+              .GEMINI_API_KEY ||
+            process.env
+              .GOOGLE_API_KEY
+        ) ||
+        ""
+      ).trim();
+
+    this.model =
+      (
+        config.model ||
+        (
+          this.provider ===
+            "openai"
+            ? process.env
+              .LLM_MODEL ||
+            DEFAULT_OPENAI_MODEL
+            : process.env
+              .GEMINI_MODEL ||
+            "gemini-2.5-flash"
+        )
+      ).trim();
+
+    this.maxRetries =
+      Number.isInteger(
+        config.maxRetries
+      ) &&
+        (
+          config.maxRetries as
+          number
+        ) >= 0
+        ? config.maxRetries as
+        number
+        : DEFAULT_MAX_RETRIES;
+
+    this.retryBaseDelayMs =
+      Number.isFinite(
+        config.retryBaseDelayMs
+      ) &&
+        (
+          config.retryBaseDelayMs as
+          number
+        ) >= 0
+        ? config.retryBaseDelayMs as
+        number
+        :
+        DEFAULT_RETRY_BASE_DELAY_MS;
+
+    this.maxRetryDelayMs =
+      Number.isFinite(
+        config.maxRetryDelayMs
+      ) &&
+        (
+          config.maxRetryDelayMs as
+          number
+        ) >= 0
+        ? config.maxRetryDelayMs as
+        number
+        :
+        DEFAULT_MAX_RETRY_DELAY_MS;
+
+    this.requestTimeoutMs =
+      Number.isFinite(
+        config.requestTimeoutMs
+      ) &&
+        (
+          config.requestTimeoutMs as
+          number
+        ) > 0
+        ? config.requestTimeoutMs as
+        number
+        :
+        DEFAULT_TIMEOUT_MS;
+  }
+
+  public async parseNaturalLanguage(
+    prompt: string
+  ): Promise<ParseResult> {
+    const safePrompt =
+      typeof prompt ===
+        "string"
+        ? prompt.trim()
+        : "";
+
+    if (!safePrompt) {
+      throw new AIProviderError(
+        "INVALID_REQUEST",
+        "Natural-language prompt is required.",
+        undefined,
+        false
       );
     }
-    return new AIProviderError("PROVIDER_UNAVAILABLE", "The AI intent provider request failed.", true);
-  }
 
-  private async classifyHttpFailure(response: Response, providerName: string): Promise<AIProviderError> {
-    const retryAfterMs = await this.readRetryAfterMs(response);
-    let providerStatus: string | undefined;
-    try {
-      const body = await response.clone().json() as { error?: { status?: unknown } };
-      providerStatus = typeof body.error?.status === "string" ? body.error.status : undefined;
-    } catch {
-      // Raw provider response bodies are intentionally ignored.
+    if (!this.apiKey) {
+      throw new AIProviderError(
+        "AUTHENTICATION_FAILED",
+        this.provider ===
+          "openai"
+          ? "OPENAI_API_KEY is not configured."
+          : "Gemini API key is not configured.",
+        undefined,
+        false
+      );
     }
 
-    if (response.status === 429 || providerStatus === "RESOURCE_EXHAUSTED") {
-      return new AIProviderError("RATE_LIMITED", `${providerName} quota is temporarily exhausted.`, true, retryAfterMs);
+    if (
+      this.provider !==
+      "openai" &&
+      this.provider !==
+      "gemini"
+    ) {
+      throw new AIProviderError(
+        "INVALID_REQUEST",
+        `Unsupported AI provider '${this.provider}'.`,
+        undefined,
+        false
+      );
     }
-    if (response.status === 401 || response.status === 403) {
-      return new AIProviderError("AUTHENTICATION_FAILED", `${providerName} rejected the configured credentials.`, false);
-    }
-    if (response.status === 404) {
-      return new AIProviderError("MODEL_UNAVAILABLE", `${providerName} could not find the configured model.`, false);
-    }
-    if (response.status === 400) {
-      return new AIProviderError("INVALID_REQUEST", `${providerName} rejected the configured request.`, false);
-    }
-    if (response.status === 408) {
-      return new AIProviderError("TIMEOUT", `${providerName} timed out while processing the request.`, true, retryAfterMs);
-    }
-    if (response.status >= 500) {
-      return new AIProviderError("PROVIDER_UNAVAILABLE", `${providerName} is temporarily unavailable.`, true, retryAfterMs);
-    }
-    return new AIProviderError("INVALID_REQUEST", `${providerName} rejected the request.`, false);
-  }
 
-  private async readRetryAfterMs(response: Response): Promise<number | undefined> {
-    const retryAfter = response.headers.get("retry-after");
-    if (retryAfter) {
-      const seconds = Number(retryAfter);
-      if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1_000);
-      const retryAt = Date.parse(retryAfter);
-      if (Number.isFinite(retryAt)) return Math.max(0, retryAt - Date.now());
-    }
-    try {
-      const body = await response.clone().json() as {
-        error?: { details?: Array<{ retryDelay?: unknown }> };
-      };
-      const retryDelay = body.error?.details?.find((detail) => typeof detail.retryDelay === "string")?.retryDelay;
-      if (typeof retryDelay === "string") {
-        const match = retryDelay.match(/^(\d+(?:\.\d+)?)s$/);
-        if (match) return Math.round(Number(match[1]) * 1_000);
+    const requestTimestampMs =
+      Date.now();
+
+    let retryCount =
+      0;
+
+    let responseText =
+      "";
+
+    let actualModel =
+      this.model;
+
+    while (true) {
+      try {
+        const result =
+          this.provider ===
+            "openai"
+            ? await this.callOpenAI(
+              safePrompt
+            )
+            : await this.callGemini(
+              safePrompt
+            );
+
+        responseText =
+          result.text;
+
+        actualModel =
+          result.actualModel ||
+          this.model;
+
+        break;
+      } catch (error) {
+        const providerError =
+          error instanceof
+            AIProviderError
+            ? error
+            :
+            new AIProviderError(
+              "PROVIDER_UNAVAILABLE",
+              error instanceof
+                Error
+                ? error.message
+                : "AI provider request failed.",
+              undefined,
+              true
+            );
+
+        if (
+          !providerError
+            .retryable ||
+          retryCount >=
+          this.maxRetries
+        ) {
+          throw providerError;
+        }
+
+        const delayMs =
+          Math.min(
+            this
+              .maxRetryDelayMs,
+            this
+              .retryBaseDelayMs *
+            2 ** retryCount
+          );
+
+        retryCount +=
+          1;
+
+        await sleep(
+          delayMs
+        );
       }
-    } catch {
-      // Retry metadata is optional.
     }
-    return undefined;
+
+    const responseTimestampMs =
+      Date.now();
+
+    const providerMetadata:
+      LLMProviderMetadata = {
+      providerType:
+        "REAL_LLM",
+      status:
+        "AVAILABLE",
+      modelIdentifier:
+        `${this.provider}:${actualModel}`,
+      promptVersion:
+        PROMPT_VERSION,
+      latencyMs:
+        responseTimestampMs -
+        requestTimestampMs,
+      requestTimestampMs,
+      responseTimestampMs,
+      retryCount,
+    };
+
+    let rawOutput:
+      unknown;
+
+    try {
+      rawOutput =
+        extractJsonObject(
+          responseText
+        );
+    } catch (error) {
+      if (
+        error instanceof
+        AIProviderError
+      ) {
+        throw error;
+      }
+
+      throw new AIProviderError(
+        "INVALID_PROVIDER_OUTPUT",
+        "AI provider response could not be parsed as JSON.",
+        undefined,
+        false
+      );
+    }
+
+    try {
+      const normalized =
+        LLMOutputValidator
+          .validateAndNormalize(
+            rawOutput,
+            safePrompt,
+            providerMetadata
+          );
+
+      return {
+        adapterName:
+          this.adapterName,
+        candidateDraft:
+          normalized
+            .candidateDraft,
+        ambiguitiesFound:
+          normalized
+            .ambiguitiesFound,
+        missingFields:
+          normalized
+            .missingFields,
+        requiresClarification:
+          normalized
+            .requiresClarification,
+        unsupportedObjective:
+          normalized
+            .unsupportedObjective,
+        unsupportedObjectiveReason:
+          normalized
+            .unsupportedObjectiveReason,
+        providerMetadata,
+      };
+    } catch (error) {
+      if (
+        error instanceof
+        AIProviderError
+      ) {
+        throw error;
+      }
+
+      const message =
+        error instanceof
+          Error
+          ? error.message
+          :
+          "AI provider response validation failed.";
+
+      throw new AIProviderError(
+        "INVALID_PROVIDER_OUTPUT",
+        message.replace(
+          /^INVALID_PROVIDER_OUTPUT:\s*/i,
+          ""
+        ),
+        undefined,
+        false
+      );
+    }
+  }
+
+  private async callOpenAI(
+    prompt: string
+  ): Promise<{
+    text: string;
+    actualModel: string;
+  }> {
+    const controller =
+      new AbortController();
+
+    const timeout =
+      setTimeout(
+        () =>
+          controller.abort(),
+        this.requestTimeoutMs
+      );
+
+    try {
+      const response =
+        await fetch(
+          OPENAI_RESPONSES_URL,
+          {
+            method:
+              "POST",
+            headers: {
+              "Content-Type":
+                "application/json",
+              Authorization:
+                `Bearer ${this.apiKey}`,
+            },
+            body:
+              JSON.stringify({
+                model:
+                  this.model,
+                instructions:
+                  SYSTEM_INSTRUCTIONS,
+                input:
+                  prompt,
+                max_output_tokens:
+                  1200,
+                store:
+                  false,
+              }),
+            signal:
+              controller.signal,
+          }
+        );
+
+      let payload:
+        OpenAIResponsePayload |
+        undefined;
+
+      try {
+        payload =
+          await response
+            .json() as
+          OpenAIResponsePayload;
+      } catch {
+        payload =
+          undefined;
+      }
+
+      if (!response.ok) {
+        throw classifyHttpFailure(
+          response.status,
+          sanitizeProviderMessage(
+            payload?.error
+              ?.message
+          )
+        );
+      }
+
+      if (!payload) {
+        throw new AIProviderError(
+          "INVALID_PROVIDER_OUTPUT",
+          "OpenAI returned an unreadable response.",
+          undefined,
+          false
+        );
+      }
+
+      const text =
+        extractOpenAIText(
+          payload
+        );
+
+      if (!text) {
+        throw new AIProviderError(
+          "INVALID_PROVIDER_OUTPUT",
+          "OpenAI returned no output text.",
+          undefined,
+          false
+        );
+      }
+
+      return {
+        text,
+        actualModel:
+          payload.model ||
+          this.model,
+      };
+    } catch (error) {
+      if (
+        error instanceof
+        AIProviderError
+      ) {
+        throw error;
+      }
+
+      if (
+        error instanceof
+        Error &&
+        error.name ===
+        "AbortError"
+      ) {
+        throw new AIProviderError(
+          "TIMEOUT",
+          "OpenAI API request timed out.",
+          undefined,
+          true
+        );
+      }
+
+      throw new AIProviderError(
+        "PROVIDER_UNAVAILABLE",
+        error instanceof
+          Error
+          ? error.message
+          :
+          "OpenAI API request failed.",
+        undefined,
+        true
+      );
+    } finally {
+      clearTimeout(
+        timeout
+      );
+    }
+  }
+
+  private async callGemini(
+    prompt: string
+  ): Promise<{
+    text: string;
+    actualModel: string;
+  }> {
+    const controller =
+      new AbortController();
+
+    const timeout =
+      setTimeout(
+        () =>
+          controller.abort(),
+        this.requestTimeoutMs
+      );
+
+    const url =
+      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
+        this.model
+      )}:generateContent?key=${encodeURIComponent(
+        this.apiKey
+      )}`;
+
+    try {
+      const response =
+        await fetch(
+          url,
+          {
+            method:
+              "POST",
+            headers: {
+              "Content-Type":
+                "application/json",
+            },
+            body:
+              JSON.stringify({
+                contents: [
+                  {
+                    role:
+                      "user",
+                    parts: [
+                      {
+                        text:
+                          `${SYSTEM_INSTRUCTIONS}\n\nUser input:\n${prompt}`,
+                      },
+                    ],
+                  },
+                ],
+                generationConfig: {
+                  temperature:
+                    0,
+                  responseMimeType:
+                    "application/json",
+                },
+              }),
+            signal:
+              controller.signal,
+          }
+        );
+
+      let payload:
+        GeminiResponsePayload |
+        undefined;
+
+      try {
+        payload =
+          await response
+            .json() as
+          GeminiResponsePayload;
+      } catch {
+        payload =
+          undefined;
+      }
+
+      if (!response.ok) {
+        throw classifyHttpFailure(
+          response.status,
+          sanitizeProviderMessage(
+            payload?.error
+              ?.message
+          )
+        );
+      }
+
+      if (!payload) {
+        throw new AIProviderError(
+          "INVALID_PROVIDER_OUTPUT",
+          "Gemini returned an unreadable response.",
+          undefined,
+          false
+        );
+      }
+
+      const text =
+        extractGeminiText(
+          payload
+        );
+
+      if (!text) {
+        throw new AIProviderError(
+          "INVALID_PROVIDER_OUTPUT",
+          "Gemini returned no output text.",
+          undefined,
+          false
+        );
+      }
+
+      return {
+        text,
+        actualModel:
+          this.model,
+      };
+    } catch (error) {
+      if (
+        error instanceof
+        AIProviderError
+      ) {
+        throw error;
+      }
+
+      if (
+        error instanceof
+        Error &&
+        error.name ===
+        "AbortError"
+      ) {
+        throw new AIProviderError(
+          "TIMEOUT",
+          "Gemini API request timed out.",
+          undefined,
+          true
+        );
+      }
+
+      throw new AIProviderError(
+        "PROVIDER_UNAVAILABLE",
+        error instanceof
+          Error
+          ? error.message
+          :
+          "Gemini API request failed.",
+        undefined,
+        true
+      );
+    } finally {
+      clearTimeout(
+        timeout
+      );
+    }
   }
 }

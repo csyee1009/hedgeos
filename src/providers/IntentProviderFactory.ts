@@ -1,57 +1,142 @@
-import { IntentEngine } from "../services/IntentEngine";
-import { LLMProviderStatus } from "../types";
-import { AIIntentProvider } from "./interfaces/AIIntentProvider";
-import { RealLLMIntentProvider } from "./RealLLMIntentProvider";
+import {
+  AIIntentProvider,
+} from "./interfaces/AIIntentProvider";
+import {
+  IntentEngine,
+} from "../services/IntentEngine";
+import {
+  AIProviderError,
+  RealLLMIntentProvider,
+} from "./RealLLMIntentProvider";
+
+const DEFAULT_OPENAI_MODEL =
+  "gpt-5.6-luna";
+
+function normalizedIntentMode():
+  "real" | "development" {
+  return (
+    process.env.INTENT_PROVIDER ||
+    "development"
+  )
+    .trim()
+    .toLowerCase() ===
+    "real"
+    ? "real"
+    : "development";
+}
+
+function normalizedLLMProvider():
+  string {
+  return (
+    process.env.LLM_PROVIDER ||
+    "openai"
+  )
+    .trim()
+    .toLowerCase();
+}
+
+function configuredOpenAIModel():
+  string {
+  return (
+    process.env.LLM_MODEL ||
+    DEFAULT_OPENAI_MODEL
+  ).trim() ||
+    DEFAULT_OPENAI_MODEL;
+}
 
 export class IntentProviderFactory {
-  private static realProviderInstance: RealLLMIntentProvider | null = null;
-  private static devProviderInstance: IntentEngine | null = null;
+  public static getActiveProvider():
+    AIIntentProvider {
+    const mode =
+      normalizedIntentMode();
 
-  public static getRealProvider(): RealLLMIntentProvider {
-    if (!this.realProviderInstance) {
-      this.realProviderInstance = new RealLLMIntentProvider();
-    }
-    return this.realProviderInstance;
-  }
-
-  public static getDevelopmentProvider(): IntentEngine {
-    if (!this.devProviderInstance) {
-      this.devProviderInstance = new IntentEngine();
-    }
-    return this.devProviderInstance;
-  }
-
-  /**
-   * Returns the active AIIntentProvider based on EXPLICIT configuration.
-   * STRICT HONESTY INVARIANT:
-   * - If INTENT_PROVIDER=real, returns RealLLMIntentProvider. Never silently falls back to development adapter.
-   * - If INTENT_PROVIDER=development (or default), returns IntentEngine (Development Adapter).
-   */
-  public static getActiveProvider(): AIIntentProvider {
-    const configuredProvider = (process.env.INTENT_PROVIDER || "development").toLowerCase();
-
-    if (configuredProvider === "real") {
-      return this.getRealProvider();
+    if (
+      mode !==
+      "real"
+    ) {
+      return new IntentEngine();
     }
 
-    return this.getDevelopmentProvider();
+    const llmProvider =
+      normalizedLLMProvider();
+
+    if (
+      llmProvider !==
+      "openai"
+    ) {
+      throw new AIProviderError(
+        "INVALID_REQUEST",
+        `Unsupported LLM_PROVIDER '${llmProvider}'. Set LLM_PROVIDER=openai.`,
+        undefined,
+        false
+      );
+    }
+
+    const apiKey =
+      (
+        process.env
+          .OPENAI_API_KEY ||
+        ""
+      ).trim();
+
+    if (!apiKey) {
+      throw new AIProviderError(
+        "AUTHENTICATION_FAILED",
+        "OPENAI_API_KEY is not configured.",
+        undefined,
+        false
+      );
+    }
+
+    return new RealLLMIntentProvider({
+      provider:
+        "openai",
+      apiKey,
+      model:
+        configuredOpenAIModel(),
+    });
   }
 
-  public static getProviderStatusSummary(): {
-    activeProviderName: string;
-    configuredIntentProvider: string;
-    realProviderStatus: LLMProviderStatus;
-    realModel: string;
-  } {
-    const realProvider = this.getRealProvider();
-    const active = this.getActiveProvider();
-    const configured = (process.env.INTENT_PROVIDER || "development").toLowerCase();
+  public static getProviderStatusSummary() {
+    const mode =
+      normalizedIntentMode();
+
+    const llmProvider =
+      normalizedLLMProvider();
+
+    const model =
+      configuredOpenAIModel();
+
+    const openAIConfigured =
+      Boolean(
+        process.env
+          .OPENAI_API_KEY
+          ?.trim()
+      );
+
+    const providerSupported =
+      llmProvider ===
+      "openai";
 
     return {
-      activeProviderName: active.adapterName,
-      configuredIntentProvider: configured,
-      realProviderStatus: realProvider.getStatus(),
-      realModel: realProvider.getModelIdentifier(),
+      configuredIntentProvider:
+        mode,
+
+      activeProviderName:
+        mode === "real"
+          ? "REAL_LLM"
+          : "DEVELOPMENT_ADAPTER",
+
+      realProviderStatus:
+        providerSupported &&
+          openAIConfigured
+          ? "READY"
+          : "NOT_CONFIGURED",
+
+      realModel:
+        providerSupported
+          ? `openai:${model}`
+          : `${llmProvider}:${model}`,
     };
   }
 }

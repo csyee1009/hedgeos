@@ -1,10 +1,6 @@
 import dns from "dns";
 dns.setDefaultResultOrder("ipv4first");
 
-import path from "path";
-import fs from "fs";
-import { fileURLToPath } from "url";
-
 import "dotenv/config";
 import cors from "cors";
 import express from "express";
@@ -62,7 +58,6 @@ import {
 
 import {
   ActionProposal,
-  BaseConfirmedGoal,
   CandidateStrategy,
   DiscoveryCandidate,
   LiveMarketExplorer,
@@ -132,11 +127,17 @@ if (allowedOriginsEnv) {
     "http://localhost:5173",
     "http://127.0.0.1:5173",
   ];
-} else {
-  allowedOrigins = [
-    `http://localhost:${process.env.PORT || 3000}`,
-    `http://127.0.0.1:${process.env.PORT || 3000}`,
-  ];
+}
+
+if (
+  isProd &&
+  allowedOrigins.length === 0
+) {
+  console.error(
+    "FATAL: HEDGEOS_ALLOWED_ORIGINS must be configured in production."
+  );
+
+  process.exit(1);
 }
 
 app.use(
@@ -532,10 +533,7 @@ app.get(
 
     const llmConfigured =
       Boolean(
-        process.env.OPENAI_API_KEY ||
-        process.env.GEMINI_API_KEY ||
-        process.env.GOOGLE_API_KEY ||
-        process.env.LLM_API_KEY
+        process.env.OPENAI_API_KEY
       );
 
     const baseRpcConfigured =
@@ -2993,20 +2991,6 @@ app.post(
       confirmedMetadataIntent.ambiguitiesFound = [];
       confirmedMetadataIntent.requiresClarification = false;
 
-      if (
-        intent.targetMaxLossPercent?.source !== "USER_ACCEPTED_LIVE_CONTRACT" ||
-        !(intent as any).baseConfirmedGoal
-      ) {
-        (intent as any).baseConfirmedGoal = {
-          asset: intent.asset!.value,
-          exposureAmount: intent.exposureAmount!.value,
-          targetMaxLossPercent: intent.targetMaxLossPercent!.value,
-          maxPremiumUSDC: intent.maxPremiumUSDC!.value,
-          horizonTimestamp: intent.horizonTimestamp!.value,
-          allowMultiLeg: intent.allowMultiLeg?.value,
-        };
-      }
-
       await intentRepository.update(
         intent
       );
@@ -3050,71 +3034,6 @@ app.post(
         "Failed to confirm risk intent.",
         err
       );
-    }
-  }
-);
-
-/* ================================================================
- * API: RESTORE BASE CONFIRMED INTENT
- * ================================================================ */
-
-app.post(
-  "/api/v1/intents/:id/restore-base",
-  async (req, res) => {
-    try {
-      const intent = await intentRepository.findById(req.params.id);
-      if (!intent) {
-        return sendSafeError(res, 404, "INTENT_NOT_FOUND", `Intent with ID '${req.params.id}' not found.`);
-      }
-
-      const baseGoal = (intent as any).baseConfirmedGoal as BaseConfirmedGoal | undefined;
-      if (!baseGoal) {
-        return res.json({ restoredIntent: intent });
-      }
-
-      intent.targetMaxLossPercent = {
-        value: baseGoal.targetMaxLossPercent,
-        source: "USER_EXPLICIT",
-        confidence: 1,
-        requiresConfirmation: false,
-      };
-
-      intent.maxPremiumUSDC = {
-        value: baseGoal.maxPremiumUSDC,
-        source: "USER_EXPLICIT",
-        confidence: 1,
-        requiresConfirmation: false,
-      };
-
-      intent.horizonTimestamp = {
-        value: baseGoal.horizonTimestamp,
-        source: "USER_EXPLICIT",
-        confidence: 1,
-        requiresConfirmation: false,
-      };
-
-      intent.confirmedByUser = true;
-      intent.confirmedAtMs = Date.now();
-      intent.updatedAtMs = Date.now();
-      intent.version += 1;
-
-      const confirmedMetadataIntent = intent as typeof intent & {
-        missingFields?: string[];
-        ambiguitiesFound?: [];
-        requiresClarification?: boolean;
-      };
-      confirmedMetadataIntent.missingFields = [];
-      confirmedMetadataIntent.ambiguitiesFound = [];
-      confirmedMetadataIntent.requiresClarification = false;
-
-      await intentRepository.update(intent);
-
-      return res.json({
-        restoredIntent: intent,
-        message: "Protection goal restored to original user-confirmed values.",
-      });
-    } catch (err: any) {
-      return sendSafeError(res, 500, "RESTORE_BASE_FAILED", "Failed to restore base protection goal.", err);
     }
   }
 );
@@ -4833,56 +4752,12 @@ app.get(
 );
 
 /* ================================================================
- * STATIC ASSETS & SPA SERVING
- * ================================================================ */
-
-const __serverFilename = fileURLToPath(import.meta.url);
-const __serverDirname = path.dirname(__serverFilename);
-
-const possibleDistPaths = [
-  path.resolve(__serverDirname, "../../dist/client"),
-  path.resolve(process.cwd(), "dist/client"),
-  path.resolve(__serverDirname, "../dist/client"),
-];
-
-const clientDistPath = possibleDistPaths.find((p) => fs.existsSync(p)) || possibleDistPaths[0];
-
-// 404 handler for unmatched /api routes
-app.use("/api", (_req, res) => {
-  return res.status(404).json({
-    error: "API endpoint not found.",
-    code: "NOT_FOUND",
-    errorCode: "NOT_FOUND",
-  });
-});
-
-if (fs.existsSync(clientDistPath)) {
-  app.use(express.static(clientDistPath));
-
-  app.use((req, res, next) => {
-    if (req.method !== "GET" && req.method !== "HEAD") {
-      return next();
-    }
-    if (
-      req.path.startsWith("/api/") ||
-      req.path === "/healthz" ||
-      req.path === "/readyz"
-    ) {
-      return next();
-    }
-    const indexPath = path.join(clientDistPath, "index.html");
-    if (fs.existsSync(indexPath)) {
-      return res.sendFile(indexPath);
-    }
-    return next();
-  });
-}
-
-/* ================================================================
  * START SERVER
  * ================================================================ */
 
-const PORT = Number(process.env.PORT || 3000);
+const PORT =
+  process.env.PORT ||
+  3001;
 
 export const serverInstance =
   app.listen(

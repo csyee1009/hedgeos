@@ -328,6 +328,24 @@ export default function App() {
   };
 
   useEffect(() => {
+    if (!acceptedCandidate || revalidationFailure) {
+      return;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      document
+        .getElementById("selected-protection-workflow")
+        ?.scrollIntoView({
+          behavior: "smooth",
+          block: "start",
+        });
+    });
+
+    return () =>
+      window.cancelAnimationFrame(frame);
+  }, [acceptedCandidate, revalidationFailure]);
+
+  useEffect(() => {
     fetch("/api/v1/market/status")
       .then((response) => {
         if (!response.ok) {
@@ -757,6 +775,7 @@ export default function App() {
     updates: {
       maxPremiumUSDC?: { amount: string };
       horizonTimestampMs?: number;
+      targetMaxLossPercent?: number;
     }
   ) => {
     if (!intent) return;
@@ -940,6 +959,19 @@ export default function App() {
     setHoldingsSource("MANUAL");
   };
 
+  const handleBackToMarket = async () => {
+    setAcceptedCandidate(null);
+    setRevalidationFailure(null);
+    setErrorMessage(undefined);
+
+    const restored =
+      await restoreBaseConfirmedIntent();
+
+    await handleSolveProtection(
+      restored || undefined
+    );
+  };
+
   const isLiveMarket =
     marketState?.status ===
     "LIVE_READ_AVAILABLE";
@@ -953,9 +985,9 @@ export default function App() {
           ? "Live · empty orderbook"
           : marketState?.status === "STALE"
             ? "Stale market evidence"
-        : marketState?.status === "NOT_CONFIGURED"
-          ? "Market not connected"
-          : "Live market unavailable";
+            : marketState?.status === "NOT_CONFIGURED"
+              ? "Market not connected"
+              : "Live market unavailable";
 
   const currentStep = !intent
     ? 1
@@ -1233,95 +1265,206 @@ export default function App() {
             uiState ===
             "SOLVED" && (
               <>
-              <CandidateList
-                intent={
-                  intent as TypedRiskIntent
-                }
-                mode={
-                  solverMode
-                }
-                candidates={
-                  candidates
-                }
-                rejectedCandidates={
-                  rejectedCandidates
-                }
-                rfqRequirement={
-                  rfqRequirement
-                }
-                rfqSpecification={
-                  rfqSpecification
-                }
-                marketExplorer={
-                  marketExplorer
-                }
-                actionProposal={
-                  actionProposal
-                }
-                simulationResult={
-                  simulationResult
-                }
-                humanReviewRecord={
-                  humanReviewRecord
-                }
-                authorizationAttestation={
-                  authorizationAttestation
-                }
-                executionCommitment={
-                  executionCommitment
-                }
-                externalHumanAuthorizationHandoff={
-                  externalHumanAuthorizationHandoff
-                }
-                policyDecisions={
-                  policyDecisions
-                }
-                marketState={
-                  marketState
-                }
-                isSolving={
-                  isSolving
-                }
-                revalidationFailure={
-                  revalidationFailure
-                }
-                onReset={
-                  handleReset
-                }
-                onRefresh={async () => {
-                  setRevalidationFailure(null);
-                  setAcceptedCandidate(null);
-                  setErrorMessage(undefined);
-                  const restored = await restoreBaseConfirmedIntent();
-                  await handleSolveProtection(restored || undefined);
-                }}
-                onEditGoal={
-                  handleEditGoal
-                }
-                onChooseAnotherContract={async () => {
-                  setRevalidationFailure(null);
-                  setAcceptedCandidate(null);
-                  setErrorMessage(undefined);
-                  const restored = await restoreBaseConfirmedIntent();
-                  await handleSolveProtection(restored || undefined);
-                }}
-                onAcceptContract={
-                  handleAcceptContract
-                }
-              />
-              {acceptedCandidate && acceptedCandidate.status === "TECHNICALLY_FEASIBLE" && !revalidationFailure && (
-                <ExternalExecutionPanel
-                  intent={intent as TypedRiskIntent}
-                  candidate={acceptedCandidate}
-                  onBackToMarket={async () => {
-                    setAcceptedCandidate(null);
-                    setRevalidationFailure(null);
-                    setErrorMessage(undefined);
-                    const restored = await restoreBaseConfirmedIntent();
-                    await handleSolveProtection(restored || undefined);
-                  }}
-                />
-              )}
+                {(!acceptedCandidate || revalidationFailure) && (
+                  <CandidateList
+                    intent={
+                      intent as TypedRiskIntent
+                    }
+                    mode={
+                      solverMode
+                    }
+                    candidates={
+                      candidates
+                    }
+                    rejectedCandidates={
+                      rejectedCandidates
+                    }
+                    rfqRequirement={
+                      rfqRequirement
+                    }
+                    rfqSpecification={
+                      rfqSpecification
+                    }
+                    marketExplorer={
+                      marketExplorer
+                    }
+                    actionProposal={
+                      actionProposal
+                    }
+                    simulationResult={
+                      simulationResult
+                    }
+                    humanReviewRecord={
+                      humanReviewRecord
+                    }
+                    authorizationAttestation={
+                      authorizationAttestation
+                    }
+                    executionCommitment={
+                      executionCommitment
+                    }
+                    externalHumanAuthorizationHandoff={
+                      externalHumanAuthorizationHandoff
+                    }
+                    policyDecisions={
+                      policyDecisions
+                    }
+                    marketState={
+                      marketState
+                    }
+                    isSolving={
+                      isSolving
+                    }
+                    revalidationFailure={
+                      revalidationFailure
+                    }
+                    onReset={
+                      handleReset
+                    }
+                    onRefresh={async () => {
+                      setRevalidationFailure(null);
+                      setAcceptedCandidate(null);
+                      setErrorMessage(undefined);
+                      const restored = await restoreBaseConfirmedIntent();
+                      await handleSolveProtection(restored || undefined);
+                    }}
+                    onEditGoal={
+                      handleEditGoal
+                    }
+                    onChooseAnotherContract={
+                      handleBackToMarket
+                    }
+                    onAcceptContract={
+                      handleAcceptContract
+                    }
+                  />
+                )}
+
+                {acceptedCandidate &&
+                  acceptedCandidate.status ===
+                  "TECHNICALLY_FEASIBLE" &&
+                  !revalidationFailure && (
+                    <div
+                      id="selected-protection-workflow"
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: "1.5rem",
+                      }}
+                    >
+                      <section className="card">
+                        <div
+                          className="card-header"
+                          style={{
+                            display: "flex",
+                            justifyContent: "space-between",
+                            alignItems: "flex-start",
+                            gap: "1rem",
+                            flexWrap: "wrap",
+                          }}
+                        >
+                          <div>
+                            <div
+                              style={{
+                                display: "flex",
+                                gap: "0.5rem",
+                                flexWrap: "wrap",
+                                marginBottom: "0.65rem",
+                              }}
+                            >
+                              <span className="badge badge-success">
+                                SELECTED PROTECTION PLAN
+                              </span>
+                              <span className="badge badge-neutral">
+                                MARKET SELECTION COMPLETE
+                              </span>
+                            </div>
+
+                            <h2>
+                              {acceptedCandidate.name}
+                            </h2>
+
+                            <p className="card-subtitle">
+                              Your selected contract is now the only active plan in the workflow.
+                              Alternative market options are hidden unless you return to the market.
+                            </p>
+                          </div>
+
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-sm"
+                            onClick={handleBackToMarket}
+                            disabled={isSolving}
+                          >
+                            ← Back to Market
+                          </button>
+                        </div>
+
+                        <div
+                          className="plan-metrics-grid"
+                          style={{ marginTop: "1rem" }}
+                        >
+                          <div className="metric-item">
+                            <span className="metric-label">
+                              Strategy
+                            </span>
+                            <span className="metric-value">
+                              {acceptedCandidate.strategyType.replace(/_/g, " ")}
+                            </span>
+                          </div>
+
+                          <div className="metric-item">
+                            <span className="metric-label">
+                              Selected Order
+                            </span>
+                            <span className="metric-value">
+                              {acceptedCandidate.quotes?.[0]?.quoteId ||
+                                acceptedCandidate.legs?.[0]?.quoteReference ||
+                                "Bound to selected candidate"}
+                            </span>
+                          </div>
+
+                          <div className="metric-item">
+                            <span className="metric-label">
+                              Candidate Status
+                            </span>
+                            <span className="metric-value">
+                              TECHNICALLY FEASIBLE
+                            </span>
+                          </div>
+
+                          <div className="metric-item">
+                            <span className="metric-label">
+                              Authorization
+                            </span>
+                            <span className="metric-value">
+                              USER-CONTROLLED WALLET
+                            </span>
+                          </div>
+                        </div>
+
+                        <div
+                          className="alert alert-info"
+                          style={{ marginTop: "1rem" }}
+                        >
+                          <strong>Financial Constitution</strong>
+                          <div style={{ marginTop: "0.3rem" }}>
+                            The selected candidate passed the current deterministic feasibility checks.
+                            Exact transaction preparation still requires fresh pre-authorization revalidation
+                            before the wallet is asked to approve anything.
+                          </div>
+                        </div>
+                      </section>
+
+                      <ExternalExecutionPanel
+                        intent={intent as TypedRiskIntent}
+                        candidate={acceptedCandidate}
+                        onBackToMarket={
+                          handleBackToMarket
+                        }
+                      />
+                    </div>
+                  )}
               </>
             )}
         </div>

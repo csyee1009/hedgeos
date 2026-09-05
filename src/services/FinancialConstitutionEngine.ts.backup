@@ -1,4 +1,4 @@
-﻿import { PolicyEngine } from "../providers/interfaces/PolicyEngine";
+import { PolicyEngine } from "../providers/interfaces/PolicyEngine";
 import {
   CandidateStrategy,
   PolicyCheckItem,
@@ -463,7 +463,7 @@ export class FinancialConstitutionEngine
         : "Protective LONG_PUT direction was not proven from signed-order evidence.",
     });
     const structureEligible = quote?.allStrikes?.length === 1
-      && ((quote.implementationName === "PUT" || quote.implementationName === "PHYSICAL_PUT") || quote.implementationName === "PHYSICAL_PUT")
+      && quote.implementationName === "PUT"
       && quote.eligibilityEvidence?.status === "ELIGIBLE_LONG_PUT";
     checks.push({
       ruleId: "POL-011",
@@ -573,5 +573,3 @@ export class FinancialConstitutionEngine
     };
   }
 }
-
-

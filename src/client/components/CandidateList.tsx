@@ -1453,7 +1453,7 @@ export const CandidateList: React.FC<CandidateListProps> = ({
         </section>
       )}
 
-      {!isRfqRequired && candidates.length > 0 && (
+      {!isRfqRequired && !marketExplorer && candidates.length > 0 && (
         <>
           <HumanReviewCard
             intent={intent}
