@@ -1,4 +1,5 @@
 import dns from "dns";
+import path from "node:path";
 dns.setDefaultResultOrder("ipv4first");
 
 import "dotenv/config";
@@ -92,6 +93,8 @@ import {
  * ================================================================ */
 
 const app = express();
+
+app.set("trust proxy", 1);
 
 app.use(requestIdMiddleware);
 app.use(requestLoggerMiddleware);
@@ -533,7 +536,8 @@ app.get(
 
     const llmConfigured =
       Boolean(
-        process.env.OPENAI_API_KEY
+        process.env.GEMINI_API_KEY ||
+        process.env.GOOGLE_API_KEY
       );
 
     const baseRpcConfigured =
@@ -4748,6 +4752,47 @@ app.get(
         err
       );
     }
+  }
+);
+
+/* ================================================================
+ * FRONTEND: SERVE VITE PRODUCTION BUILD
+ * ================================================================ */
+
+const clientDistPath =
+  path.resolve(
+    process.cwd(),
+    "dist",
+    "client"
+  );
+
+app.use(
+  express.static(
+    clientDistPath
+  )
+);
+
+app.use(
+  (
+    req,
+    res,
+    next
+  ) => {
+    if (
+      req.method !== "GET" ||
+      req.path.startsWith("/api/") ||
+      req.path === "/healthz" ||
+      req.path === "/readyz"
+    ) {
+      return next();
+    }
+
+    return res.sendFile(
+      path.join(
+        clientDistPath,
+        "index.html"
+      )
+    );
   }
 );
 

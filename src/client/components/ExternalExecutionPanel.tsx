@@ -246,7 +246,7 @@ export function ExternalExecutionPanel(props: {
     setDemoSimulation(true);
     setMessageType("SUCCESS");
     setMessage(
-      "Hackathon demo mode advanced the presentation without broadcasting a transaction. No Base transaction, transaction hash, or on-chain verification was created. The real wallet execution path remains implemented for a valid revalidated preparation and a funded user-controlled wallet."
+      "Hackathon demo mode advanced the presentation without broadcasting a transaction. No Base transaction, transaction hash, or on-chain verification was created. HedgeOS still prepares an exact unsigned transaction package and can verify a real externally submitted transaction hash, while signing and submission remain outside HedgeOS."
     );
     setTrack2State("TRACK2_DEMO_SIMULATED");
 
@@ -313,236 +313,6 @@ export function ExternalExecutionPanel(props: {
   const verify = async () => {
     if (!/^0x[0-9a-fA-F]{64}$/.test(transactionHash)) return;
     await verifyTransactionHash(transactionHash);
-  };
-
-  const toRpcQuantity = (value: unknown): string | undefined => {
-    if (value === undefined || value === null) return undefined;
-
-    if (typeof value === "string") {
-      const trimmed = value.trim();
-      if (!trimmed) return undefined;
-      if (/^0x[0-9a-fA-F]+$/.test(trimmed)) return trimmed;
-      if (/^\d+$/.test(trimmed)) return `0x${BigInt(trimmed).toString(16)}`;
-      return undefined;
-    }
-
-    if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
-      return `0x${BigInt(Math.trunc(value)).toString(16)}`;
-    }
-
-    if (typeof value === "bigint" && value >= 0n) {
-      return `0x${value.toString(16)}`;
-    }
-
-    return undefined;
-  };
-
-  const ensureBaseMainnet = async (): Promise<boolean> => {
-    if (!window.ethereum) return false;
-
-    const currentChainHex = (await window.ethereum.request({
-      method: "eth_chainId",
-    })) as string;
-
-    const currentChainId = Number.parseInt(currentChainHex, 16);
-    if (currentChainId === 8453) {
-      setWalletChainId(8453);
-      return true;
-    }
-
-    try {
-      await window.ethereum.request({
-        method: "wallet_switchEthereumChain",
-        params: [{ chainId: "0x2105" }],
-      });
-    } catch (error: any) {
-      if (error?.code !== 4902) {
-        throw error;
-      }
-
-      await window.ethereum.request({
-        method: "wallet_addEthereumChain",
-        params: [
-          {
-            chainId: "0x2105",
-            chainName: "Base Mainnet",
-            nativeCurrency: {
-              name: "Ether",
-              symbol: "ETH",
-              decimals: 18,
-            },
-            rpcUrls: ["https://mainnet.base.org"],
-            blockExplorerUrls: ["https://basescan.org"],
-          },
-        ],
-      });
-    }
-
-    const updatedChainHex = (await window.ethereum.request({
-      method: "eth_chainId",
-    })) as string;
-
-    const updatedChainId = Number.parseInt(updatedChainHex, 16);
-    setWalletChainId(updatedChainId);
-    setWalletMessage(
-      updatedChainId === 8453
-        ? "Wallet connected on Base Mainnet."
-        : `Wallet connected on chain ${updatedChainId}. HedgeOS expects Base Mainnet (8453).`
-    );
-
-    return updatedChainId === 8453;
-  };
-
-  const waitForTransactionReceipt = async (
-    hash: string,
-    attempts = 20,
-    delayMs = 1500
-  ): Promise<any | null> => {
-    if (!window.ethereum) return null;
-
-    for (let attempt = 0; attempt < attempts; attempt += 1) {
-      const receipt = await window.ethereum.request({
-        method: "eth_getTransactionReceipt",
-        params: [hash],
-      });
-
-      if (receipt) {
-        return receipt;
-      }
-
-      await new Promise((resolve) => window.setTimeout(resolve, delayMs));
-    }
-
-    return null;
-  };
-
-  const authorizeWithWallet = async () => {
-    if (!preparation || !window.ethereum) {
-      setMessageType("ERROR");
-      setMessage("Connect a browser wallet and prepare a fresh exact transaction first.");
-      return;
-    }
-
-    if (!walletAddress) {
-      setMessageType("ERROR");
-      setMessage("Connect the wallet that will authorize this transaction.");
-      return;
-    }
-
-    if (walletAddress.toLowerCase() !== beneficiary.toLowerCase()) {
-      setMessageType("ERROR");
-      setMessage(
-        "The connected wallet must match the beneficiary used during exact transaction preparation. Reconnect the intended wallet or prepare again."
-      );
-      return;
-    }
-
-    if (
-      preparation.transaction.validUntilMs &&
-      Date.now() >= preparation.transaction.validUntilMs
-    ) {
-      setMessageType("ERROR");
-      setMessage(
-        "This prepared transaction has passed its freshness deadline. Prepare and revalidate a fresh transaction before authorization."
-      );
-      setTrack2State("TRACK2_VERIFICATION_FAILED");
-      return;
-    }
-
-    setBusy(true);
-    setVerification(undefined);
-    setMessageType("INFO");
-    setMessage("Opening your wallet with the exact revalidated Thetanuts transaction…");
-    setTrack2State("TRACK2_AWAITING_EXTERNAL_AUTHORIZATION");
-
-    try {
-      const onBase = await ensureBaseMainnet();
-      if (!onBase) {
-        throw new Error("Wallet must be on Base Mainnet (chain ID 8453).");
-      }
-
-      const accounts = (await window.ethereum.request({
-        method: "eth_accounts",
-      })) as string[];
-
-      const activeAccount = accounts?.[0] || "";
-      if (!activeAccount || activeAccount.toLowerCase() !== walletAddress.toLowerCase()) {
-        throw new Error("The active wallet account changed. Reconnect the intended wallet and prepare again.");
-      }
-
-      const transactionRequest: {
-        from: string;
-        to: string;
-        data: string;
-        value?: string;
-      } = {
-        from: walletAddress,
-        to: preparation.transaction.to,
-        data: preparation.transaction.data,
-      };
-
-      const rpcValue = toRpcQuantity(preparation.transaction.value);
-      if (rpcValue !== undefined) {
-        transactionRequest.value = rpcValue;
-      }
-
-      const hash = (await window.ethereum.request({
-        method: "eth_sendTransaction",
-        params: [transactionRequest],
-      })) as string;
-
-      if (!/^0x[0-9a-fA-F]{64}$/.test(hash || "")) {
-        throw new Error("The wallet did not return a valid Base transaction hash.");
-      }
-
-      setTransactionHash(hash);
-      setTrack2State("TRACK2_TX_HASH_PROVIDED");
-      setMessageType("SUCCESS");
-      setMessage(
-        "Wallet authorization submitted the exact prepared transaction. HedgeOS captured the transaction hash and is waiting for the Base receipt."
-      );
-
-      const receipt = await waitForTransactionReceipt(hash);
-
-      if (!receipt) {
-        setMessageType("INFO");
-        setMessage(
-          "Transaction submitted successfully, but the Base receipt is still pending. The captured hash is kept below; use Verify Real Trade once the transaction is mined."
-        );
-        return;
-      }
-
-      const receiptStatus =
-        typeof receipt.status === "string"
-          ? Number.parseInt(receipt.status, 16)
-          : Number(receipt.status);
-
-      if (Number.isFinite(receiptStatus) && receiptStatus === 0) {
-        setMessageType("ERROR");
-        setMessage("The wallet submitted the transaction, but the Base receipt shows that it reverted.");
-        setTrack2State("TRACK2_VERIFICATION_FAILED");
-        return;
-      }
-
-      setBusy(false);
-      await verifyTransactionHash(hash);
-    } catch (error: any) {
-      setMessageType("ERROR");
-
-      if (error?.code === 4001) {
-        setMessage("Wallet authorization was rejected. No transaction was submitted by HedgeOS.");
-        setTrack2State("TRACK2_AWAITING_EXTERNAL_AUTHORIZATION");
-      } else {
-        setMessage(
-          error instanceof Error
-            ? error.message
-            : "Wallet authorization could not be completed."
-        );
-        setTrack2State("TRACK2_VERIFICATION_FAILED");
-      }
-    } finally {
-      setBusy(false);
-    }
   };
 
   const selectedQuote = props.candidate.quotes[0];
@@ -769,7 +539,7 @@ export function ExternalExecutionPanel(props: {
       </div>
 
       <p className="disclosure" style={{ fontSize: "0.78rem", color: "var(--text-secondary)", marginTop: "0.5rem" }}>
-        🛡️ HedgeOS never receives private keys or seed phrases. The prepared transaction remains unsigned until the connected wallet shows its own approval prompt; only that wallet can sign and broadcast it.
+        🛡️ HedgeOS never receives private keys or seed phrases. HedgeOS prepares and revalidates an unsigned transaction package only; signing and submission remain outside the HedgeOS trust boundary.
       </p>
 
       {message && <div className={messageClass} style={{ marginTop: "1rem" }}>{message}</div>}
@@ -803,36 +573,15 @@ export function ExternalExecutionPanel(props: {
             Notice: This package contains only safe/public execution metadata. Never includes private keys, seed phrases, signed raw transactions, or wallet secrets.
           </p>
 
-          {/* USER-CONTROLLED WALLET AUTHORIZATION */}
+          {/* EXTERNAL WALLET AUTHORIZATION HANDOFF */}
           <div style={{ marginTop: "1rem", padding: "0.85rem", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", background: "var(--surface)" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: "0.75rem", alignItems: "flex-start", flexWrap: "wrap" }}>
-              <div>
-                <strong style={{ fontSize: "0.88rem" }}>USER-CONTROLLED WALLET AUTHORIZATION</strong>
-                <p style={{ fontSize: "0.82rem", margin: "0.35rem 0 0" }}>
-                  HedgeOS will pass the exact server-prepared <code>to</code>, <code>data</code>, and <code>value</code> fields to the connected wallet. The wallet must show its own approval prompt before anything is signed or broadcast.
-                </p>
-              </div>
+            <strong style={{ fontSize: "0.88rem" }}>EXTERNAL WALLET AUTHORIZATION REQUIRED</strong>
 
-              <button
-                type="button"
-                className="btn btn-primary"
-                onClick={authorizeWithWallet}
-                disabled={
-                  busy ||
-                  !walletAddress ||
-                  !walletMatchesBeneficiary ||
-                  preparationExpired
-                }
-              >
-                {busy
-                  ? "Waiting for Wallet / Base…"
-                  : walletChainId === 8453
-                    ? "Authorize Exact Tx in Wallet →"
-                    : "Switch to Base & Authorize →"}
-              </button>
-            </div>
+            <p style={{ fontSize: "0.82rem", margin: "0.35rem 0 0.75rem" }}>
+              HedgeOS has prepared and freshly revalidated the exact unsigned transaction package. For custody safety, signing and submission occur outside HedgeOS using a user-controlled wallet.
+            </p>
 
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "0.4rem", fontSize: "0.8rem", marginTop: "0.75rem" }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "0.4rem", fontSize: "0.8rem" }}>
               <span>Network: <strong>Base Mainnet (8453)</strong></span>
               <span>Selected Order: <strong>{unsignedTxPackage.quoteId}</strong></span>
               <span>Strike: <strong>{unsignedTxPackage.strike}</strong></span>
@@ -840,29 +589,26 @@ export function ExternalExecutionPanel(props: {
               <span>Quantity: <strong>{unsignedTxPackage.quantity}</strong></span>
               <span>Expected Cost: <strong>{unsignedTxPackage.expectedCost}</strong></span>
               <span>Contract: <code>{unsignedTxPackage.to.slice(0, 10)}...</code></span>
-              <span>Freshness: <strong style={{ color: preparationExpired ? "var(--color-danger, #ef4444)" : "var(--color-success, #10b981)" }}>{preparationExpired ? "EXPIRED — PREPARE AGAIN" : "REVALIDATED"}</strong></span>
+              <span>
+                Freshness:{" "}
+                <strong style={{ color: preparationExpired ? "var(--color-danger, #ef4444)" : "var(--color-success, #10b981)" }}>
+                  {preparationExpired ? "EXPIRED — PREPARE AGAIN" : "REVALIDATED"}
+                </strong>
+              </span>
             </div>
 
-            {!walletAddress && (
-              <div className="alert alert-info" style={{ marginTop: "0.75rem", marginBottom: 0 }}>
-                Connect the wallet that will authorize the transaction.
-              </div>
-            )}
-
-            {walletAddress && !walletMatchesBeneficiary && (
-              <div className="alert alert-danger" style={{ marginTop: "0.75rem", marginBottom: 0 }}>
-                Connected wallet and prepared beneficiary do not match. Prepare again using the connected wallet before authorization.
-              </div>
-            )}
+            <div className="alert alert-info" style={{ marginTop: "0.75rem", marginBottom: 0 }}>
+              Use <strong>Copy Transaction Details</strong> for the external authorization handoff. After an eligible user-controlled wallet submits the real transaction, paste the returned Base transaction hash below and HedgeOS will independently verify it.
+            </div>
           </div>
 
-          {/* AUTOMATIC HASH CAPTURE + MANUAL VERIFICATION FALLBACK */}
+          {/* EXTERNAL TRANSACTION HASH RETURN & VERIFICATION */}
           <div style={{ marginTop: "1.25rem" }}>
             <label htmlFor="tx-hash" style={{ display: "block", marginBottom: "0.35rem", fontSize: "0.875rem" }}>
               <strong>Base Mainnet Transaction Hash</strong>
             </label>
             <p style={{ fontSize: "0.78rem", color: "var(--text-secondary)", margin: "0 0 0.5rem" }}>
-              Automatically captured after wallet submission. You can still paste a valid hash here as a fallback and run verification again.
+              Paste the Base Mainnet transaction hash returned after external wallet authorization. HedgeOS will verify the transaction, event, and resulting option position.
             </p>
 
             <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
@@ -919,7 +665,7 @@ export function ExternalExecutionPanel(props: {
             <div>Selected market order: <strong>{selectedQuote?.quoteId || props.candidate.strategyId}</strong></div>
             <div>Strategy: <strong>{props.candidate.strategyType}</strong></div>
             <div>Network target: <strong>Base Mainnet (8453)</strong></div>
-            <div>Wallet integration: <strong>IMPLEMENTED</strong></div>
+            <div>Unsigned transaction handoff: <strong>IMPLEMENTED</strong></div>
             <div>Real mainnet transaction: <strong>NOT SUBMITTED</strong></div>
             <div>Transaction hash: <strong>NOT CREATED</strong></div>
             <div>On-chain verification: <strong>NOT PERFORMED</strong></div>
@@ -927,7 +673,7 @@ export function ExternalExecutionPanel(props: {
           </div>
 
           <div className="alert alert-info" style={{ marginTop: "1rem", marginBottom: 0 }}>
-            <strong>Live capability:</strong> The real path remains available through Prepare &amp; Revalidate → wallet approval → automatic transaction-hash capture → Base on-chain verification when the candidate passes the required checks and a funded user-controlled wallet approves the transaction.
+            <strong>Live capability:</strong> The real path remains available through Prepare &amp; Revalidate → external user-controlled wallet authorization → transaction-hash return → Base on-chain verification. HedgeOS itself does not sign or submit the transaction.
           </div>
         </div>
       )}

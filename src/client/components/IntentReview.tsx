@@ -1603,9 +1603,9 @@ export const IntentReview:
               <button
                 type="button"
                 className={`btn btn-sm ${intent.allowMultiLeg
-                    ?.value
-                    ? "btn-primary"
-                    : "btn-secondary"
+                  ?.value
+                  ? "btn-primary"
+                  : "btn-secondary"
                   }`}
                 onClick={() =>
                   onUpdateIntent({
@@ -1623,9 +1623,9 @@ export const IntentReview:
               <button
                 type="button"
                 className={`btn btn-sm ${!intent.allowMultiLeg
-                    ?.value
-                    ? "btn-primary"
-                    : "btn-secondary"
+                  ?.value
+                  ? "btn-primary"
+                  : "btn-secondary"
                   }`}
                 onClick={() =>
                   onUpdateIntent({

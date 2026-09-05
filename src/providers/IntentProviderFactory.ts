@@ -5,12 +5,11 @@ import {
   IntentEngine,
 } from "../services/IntentEngine";
 import {
-  AIProviderError,
   RealLLMIntentProvider,
 } from "./RealLLMIntentProvider";
 
-const DEFAULT_OPENAI_MODEL =
-  "gpt-5.6-luna";
+const DEFAULT_GEMINI_MODEL =
+  "gemini-3.6-flash";
 
 function normalizedIntentMode():
   "real" | "development" {
@@ -29,19 +28,28 @@ function normalizedLLMProvider():
   string {
   return (
     process.env.LLM_PROVIDER ||
-    "openai"
+    "gemini"
   )
     .trim()
     .toLowerCase();
 }
 
-function configuredOpenAIModel():
+function configuredGeminiModel():
   string {
   return (
     process.env.LLM_MODEL ||
-    DEFAULT_OPENAI_MODEL
+    DEFAULT_GEMINI_MODEL
   ).trim() ||
-    DEFAULT_OPENAI_MODEL;
+    DEFAULT_GEMINI_MODEL;
+}
+
+function configuredGeminiKey():
+  string {
+  return (
+    process.env.GEMINI_API_KEY ||
+    process.env.GOOGLE_API_KEY ||
+    ""
+  ).trim();
 }
 
 export class IntentProviderFactory {
@@ -62,38 +70,25 @@ export class IntentProviderFactory {
 
     if (
       llmProvider !==
-      "openai"
+      "gemini"
     ) {
-      throw new AIProviderError(
-        "INVALID_REQUEST",
-        `Unsupported LLM_PROVIDER '${llmProvider}'. Set LLM_PROVIDER=openai.`,
-        undefined,
-        false
-      );
-    }
-
-    const apiKey =
-      (
-        process.env
-          .OPENAI_API_KEY ||
-        ""
-      ).trim();
-
-    if (!apiKey) {
-      throw new AIProviderError(
-        "AUTHENTICATION_FAILED",
-        "OPENAI_API_KEY is not configured.",
-        undefined,
-        false
-      );
+      return new RealLLMIntentProvider({
+        provider:
+          llmProvider,
+        apiKey:
+          "",
+        model:
+          configuredGeminiModel(),
+      });
     }
 
     return new RealLLMIntentProvider({
       provider:
-        "openai",
-      apiKey,
+        "gemini",
+      apiKey:
+        configuredGeminiKey(),
       model:
-        configuredOpenAIModel(),
+        configuredGeminiModel(),
     });
   }
 
@@ -105,18 +100,16 @@ export class IntentProviderFactory {
       normalizedLLMProvider();
 
     const model =
-      configuredOpenAIModel();
+      configuredGeminiModel();
 
-    const openAIConfigured =
+    const geminiConfigured =
       Boolean(
-        process.env
-          .OPENAI_API_KEY
-          ?.trim()
+        configuredGeminiKey()
       );
 
     const providerSupported =
       llmProvider ===
-      "openai";
+      "gemini";
 
     return {
       configuredIntentProvider:
@@ -129,13 +122,13 @@ export class IntentProviderFactory {
 
       realProviderStatus:
         providerSupported &&
-          openAIConfigured
+          geminiConfigured
           ? "READY"
           : "NOT_CONFIGURED",
 
       realModel:
         providerSupported
-          ? `openai:${model}`
+          ? `gemini:${model}`
           : `${llmProvider}:${model}`,
     };
   }
