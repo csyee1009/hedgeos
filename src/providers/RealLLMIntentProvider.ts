@@ -17,6 +17,29 @@ export interface RealLLMConfig {
   baseUrl?: string;
   maxRetries?: number;
   timeoutMs?: number;
+  retryBaseDelayMs?: number;
+  maxRetryDelayMs?: number;
+}
+
+export type AIProviderErrorCode =
+  | "RATE_LIMITED"
+  | "TIMEOUT"
+  | "AUTHENTICATION_FAILED"
+  | "MODEL_UNAVAILABLE"
+  | "INVALID_REQUEST"
+  | "INVALID_PROVIDER_OUTPUT"
+  | "PROVIDER_UNAVAILABLE";
+
+export class AIProviderError extends Error {
+  constructor(
+    public readonly code: AIProviderErrorCode,
+    message: string,
+    public readonly retryable: boolean,
+    public readonly retryAfterMs?: number,
+  ) {
+    super(`${code}: ${message}`);
+    this.name = "AIProviderError";
+  }
 }
 
 export class RealLLMIntentProvider implements AIIntentProvider {
@@ -29,33 +52,40 @@ export class RealLLMIntentProvider implements AIIntentProvider {
   private baseUrl?: string;
   private maxRetries: number;
   private timeoutMs: number;
+  private retryBaseDelayMs: number;
+  private maxRetryDelayMs: number;
 
   constructor(config?: RealLLMConfig) {
-    const envApiKey =
+    const envApiKey = (
       process.env.LLM_API_KEY ||
       process.env.GEMINI_API_KEY ||
       process.env.OPENAI_API_KEY ||
       process.env.OPENROUTER_API_KEY ||
-      "";
-
+      ""
+    ).trim();
     const envProvider = (
       process.env.LLM_PROVIDER ||
       (process.env.GEMINI_API_KEY ? "gemini" : process.env.OPENAI_API_KEY ? "openai" : "gemini")
-    ).toLowerCase() as any;
+    )
+      .toLowerCase()
+      .trim() as RealLLMConfig["provider"];
 
-    this.providerVendor = config?.provider || envProvider;
-    this.apiKey = config?.apiKey || envApiKey;
-    this.model = config?.model || process.env.LLM_MODEL || (this.providerVendor === "gemini" ? "gemini-3.7-flash" : "gpt-4o-mini");
-    this.baseUrl = config?.baseUrl;
-    this.maxRetries = config?.maxRetries ?? 2; // Bounded retries
-    this.timeoutMs = config?.timeoutMs ?? 15000;
+    this.providerVendor = config?.provider || envProvider || "gemini";
+    this.apiKey = (config?.apiKey || envApiKey).trim();
+    this.model = (
+      config?.model ||
+      process.env.LLM_MODEL?.trim() ||
+      (this.providerVendor === "gemini" ? "gemini-3.7-flash" : "gpt-4o-mini")
+    ).trim();
+    this.baseUrl = config?.baseUrl?.trim();
+    this.maxRetries = config?.maxRetries ?? 2;
+    this.timeoutMs = config?.timeoutMs ?? 15_000;
+    this.retryBaseDelayMs = config?.retryBaseDelayMs ?? 1_000;
+    this.maxRetryDelayMs = config?.maxRetryDelayMs ?? 8_000;
   }
 
   public getStatus(): LLMProviderStatus {
-    if (!this.apiKey || this.apiKey.trim() === "") {
-      return "NOT_CONFIGURED";
-    }
-    return "READY";
+    return this.apiKey.trim() === "" ? "NOT_CONFIGURED" : "READY";
   }
 
   public getModelIdentifier(): string {
@@ -63,34 +93,25 @@ export class RealLLMIntentProvider implements AIIntentProvider {
   }
 
   public async parseNaturalLanguage(prompt: string): Promise<ParseResult> {
-    const status = this.getStatus();
     const requestTimestampMs = Date.now();
-
-    if (status === "NOT_CONFIGURED") {
-      throw new Error(
-        "AUTHENTICATION_FAILED: AI intent parsing is not configured. Missing LLM_API_KEY."
-      );
+    if (this.getStatus() === "NOT_CONFIGURED") {
+      throw new AIProviderError("AUTHENTICATION_FAILED", "AI intent parsing is not configured.", false);
     }
 
-    let retryCount = 0;
-    let lastError: any = null;
-
-    while (retryCount <= this.maxRetries) {
+    let lastError: AIProviderError | undefined;
+    for (let retryCount = 0; retryCount <= this.maxRetries; retryCount += 1) {
       try {
         const rawJsonText = await this.callLLMWithTimeout(prompt);
         const responseTimestampMs = Date.now();
-        const latencyMs = responseTimestampMs - requestTimestampMs;
-
         let parsedJson: unknown;
         try {
-          // Remove Markdown code block wrappers if model wrapped JSON in ```json ... ```
           let cleanJsonStr = rawJsonText.trim();
           if (cleanJsonStr.startsWith("```")) {
             cleanJsonStr = cleanJsonStr.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "");
           }
           parsedJson = JSON.parse(cleanJsonStr);
-        } catch (jsonErr: any) {
-          throw new Error("INVALID_PROVIDER_OUTPUT: Model response was not valid JSON.");
+        } catch {
+          throw new AIProviderError("INVALID_PROVIDER_OUTPUT", "The model response was not valid JSON.", false);
         }
 
         const metadata: LLMProviderMetadata = {
@@ -98,13 +119,23 @@ export class RealLLMIntentProvider implements AIIntentProvider {
           status: "AVAILABLE",
           modelIdentifier: this.getModelIdentifier(),
           promptVersion: PROMPT_VERSION,
-          latencyMs,
+          latencyMs: responseTimestampMs - requestTimestampMs,
           requestTimestampMs,
           responseTimestampMs,
           retryCount,
         };
 
-        const validated = LLMOutputValidator.validateAndNormalize(parsedJson, prompt, metadata);
+        let validated: ReturnType<typeof LLMOutputValidator.validateAndNormalize>;
+        try {
+          validated = LLMOutputValidator.validateAndNormalize(parsedJson, prompt, metadata);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Schema validation failed.";
+          throw new AIProviderError(
+            "INVALID_PROVIDER_OUTPUT",
+            message.replace(/^INVALID_PROVIDER_OUTPUT:\s*/, ""),
+            false,
+          );
+        }
 
         return {
           adapterName: this.adapterName,
@@ -116,67 +147,37 @@ export class RealLLMIntentProvider implements AIIntentProvider {
           unsupportedObjectiveReason: validated.unsupportedObjectiveReason,
           providerMetadata: metadata,
         };
-      } catch (err: any) {
-        lastError = err;
-
-        // Never retry schema validation errors or invalid outputs
-        if (err.message?.startsWith("INVALID_PROVIDER_OUTPUT")) {
-          break;
-        }
-
-        // Only retry on rate limit (429) or transient 5xx/timeout/temporary unavailability
-        const isTimeout = err.name === "AbortError" || err.message?.includes("aborted") || err.message?.includes("TIMEOUT");
-        const isTransient =
-          err.message?.includes("RATE_LIMITED") ||
-          err.message?.includes("429") ||
-          err.message?.includes("500") ||
-          err.message?.includes("503") ||
-          err.message?.includes("PROVIDER_UNAVAILABLE") ||
-          isTimeout;
-
-        if (isTransient && retryCount < this.maxRetries) {
-          retryCount++;
-          await new Promise((r) => setTimeout(r, 1500 * retryCount)); // Exponential backoff
-          continue;
-        }
-        break;
+      } catch (error) {
+        lastError = this.normalizeProviderError(error);
+        if (!lastError.retryable || retryCount >= this.maxRetries) break;
+        if (lastError.retryAfterMs !== undefined && lastError.retryAfterMs > this.maxRetryDelayMs) break;
+        const waitMs = Math.min(
+          this.maxRetryDelayMs,
+          Math.max(this.retryBaseDelayMs * 2 ** retryCount, lastError.retryAfterMs ?? 0),
+        );
+        if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
       }
     }
 
-    // Classify error cleanly without leaking raw response bodies or secret headers
-    const isTimeout = lastError?.name === "AbortError" || lastError?.message?.includes("aborted") || lastError?.message?.includes("TIMEOUT");
-    const isRateLimited = lastError?.message?.includes("RATE_LIMITED") || lastError?.message?.includes("429");
-    const isAuthFailed = lastError?.message?.includes("AUTHENTICATION_FAILED") || lastError?.message?.includes("401") || lastError?.message?.includes("403");
-    const isInvalidOutput = lastError?.message?.startsWith("INVALID_PROVIDER_OUTPUT");
-
-    if (isTimeout) {
-      throw new Error("TIMEOUT: AI intent provider request timed out.");
-    } else if (isRateLimited) {
-      throw new Error("RATE_LIMITED: AI intent provider rate limit exceeded.");
-    } else if (isAuthFailed) {
-      throw new Error("AUTHENTICATION_FAILED: AI intent provider authentication failed.");
-    } else if (isInvalidOutput) {
-      throw new Error(lastError.message);
-    } else {
-      throw new Error("PROVIDER_UNAVAILABLE: AI intent provider is currently unavailable.");
-    }
+    throw lastError ?? new AIProviderError("PROVIDER_UNAVAILABLE", "The AI intent provider request failed.", true);
   }
 
   private async callLLMWithTimeout(prompt: string): Promise<string> {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), this.timeoutMs);
-
     try {
-      if (this.providerVendor === "gemini") {
-        return await this.callGemini(prompt, controller.signal);
-      } else {
-        return await this.callOpenAICompatible(prompt, controller.signal);
+      return this.providerVendor === "gemini"
+        ? await this.callGemini(prompt, controller.signal)
+        : await this.callOpenAICompatible(prompt, controller.signal);
+    } catch (error) {
+      if (controller.signal.aborted || (error instanceof Error && error.name === "AbortError")) {
+        throw new AIProviderError("TIMEOUT", "The AI intent provider request timed out.", true);
       }
-    } catch (err: any) {
-      if (err.name === "AbortError" || err.message?.includes("aborted")) {
-        throw new Error("TIMEOUT: Provider request aborted after timeout.");
+      if (error instanceof AIProviderError) throw error;
+      if (error instanceof TypeError) {
+        throw new AIProviderError("PROVIDER_UNAVAILABLE", "The AI intent provider could not be reached.", true);
       }
-      throw err;
+      throw error;
     } finally {
       clearTimeout(timeoutId);
     }
@@ -184,114 +185,125 @@ export class RealLLMIntentProvider implements AIIntentProvider {
 
   private async callGemini(prompt: string, signal: AbortSignal): Promise<string> {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:generateContent?key=${this.apiKey}`;
-    const payload = {
-      system_instruction: {
-        parts: [{ text: INTENT_EXTRACTION_SYSTEM_PROMPT }],
-      },
-      contents: [
-        {
-          parts: [{ text: buildIntentExtractionUserPrompt(prompt) }],
-        },
-      ],
-      generationConfig: {
-        response_mime_type: "application/json",
-        // Deprecated sampling params (temperature, top_p, top_k) omitted for Gemini 3.7+ compatibility
-      },
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        system_instruction: { parts: [{ text: INTENT_EXTRACTION_SYSTEM_PROMPT }] },
+        contents: [{ parts: [{ text: buildIntentExtractionUserPrompt(prompt) }] }],
+        generationConfig: { response_mime_type: "application/json" },
+      }),
+      signal,
+    });
+    if (!response.ok) throw await this.classifyHttpFailure(response, "Gemini");
+
+    const data = await response.json() as {
+      candidates?: Array<{ content?: { parts?: Array<{ text?: unknown }> } }>;
     };
-
-    let res: Response;
-    try {
-      res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-        signal,
-      });
-    } catch (netErr: any) {
-      if (netErr.name === "AbortError" || signal.aborted) {
-        throw new Error("TIMEOUT: Gemini API connection timed out.");
-      }
-      throw new Error("PROVIDER_UNAVAILABLE: Network connection to Gemini API failed.");
-    }
-
-    if (!res.ok && (res.status === 429 || res.status === 404) && this.model !== "gemini-3.6-flash") {
-      try {
-        const fallbackUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${this.apiKey}`;
-        const fallbackRes = await fetch(fallbackUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-          signal,
-        });
-        if (fallbackRes.ok) {
-          res = fallbackRes;
-        }
-      } catch {
-        // preserve original response error
-      }
-    }
-
-    if (!res.ok) {
-      if (res.status === 429) {
-        throw new Error("RATE_LIMITED: Gemini API rate limit exceeded (429).");
-      } else if (res.status === 401 || res.status === 403) {
-        throw new Error("AUTHENTICATION_FAILED: Invalid Gemini API credentials.");
-      }
-      throw new Error(`PROVIDER_UNAVAILABLE: Gemini API returned status ${res.status}.`);
-    }
-
-    const data: any = await res.json();
     const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!text) {
-      throw new Error("INVALID_PROVIDER_OUTPUT: Gemini API returned empty text content.");
+    if (typeof text !== "string" || text.trim() === "") {
+      throw new AIProviderError("INVALID_PROVIDER_OUTPUT", "Gemini returned no text content.", false);
     }
     return text;
   }
 
   private async callOpenAICompatible(prompt: string, signal: AbortSignal): Promise<string> {
-    const endpoint = this.baseUrl || (this.providerVendor === "openrouter" ? "https://openrouter.ai/api/v1/chat/completions" : "https://api.openai.com/v1/chat/completions");
-    const payload = {
-      model: this.model,
-      messages: [
-        { role: "system", content: INTENT_EXTRACTION_SYSTEM_PROMPT },
-        { role: "user", content: buildIntentExtractionUserPrompt(prompt) },
-      ],
-      response_format: { type: "json_object" },
-      temperature: 0.1,
-    };
+    const endpoint = this.baseUrl || (this.providerVendor === "openrouter"
+      ? "https://openrouter.ai/api/v1/chat/completions"
+      : "https://api.openai.com/v1/chat/completions");
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.apiKey}` },
+      body: JSON.stringify({
+        model: this.model,
+        messages: [
+          { role: "system", content: INTENT_EXTRACTION_SYSTEM_PROMPT },
+          { role: "user", content: buildIntentExtractionUserPrompt(prompt) },
+        ],
+        response_format: { type: "json_object" },
+        temperature: 0.1,
+      }),
+      signal,
+    });
+    if (!response.ok) throw await this.classifyHttpFailure(response, "AI provider");
 
-    let res: Response;
-    try {
-      res = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${this.apiKey}`,
-        },
-        body: JSON.stringify(payload),
-        signal,
-      });
-    } catch (netErr: any) {
-      if (netErr.name === "AbortError" || signal.aborted) {
-        throw new Error("TIMEOUT: OpenAI-compatible API connection timed out.");
-      }
-      throw new Error("PROVIDER_UNAVAILABLE: Network connection to API endpoint failed.");
-    }
-
-    if (!res.ok) {
-      if (res.status === 429) {
-        throw new Error("RATE_LIMITED: API rate limit exceeded (429).");
-      } else if (res.status === 401 || res.status === 403) {
-        throw new Error("AUTHENTICATION_FAILED: Invalid API credentials.");
-      }
-      throw new Error(`PROVIDER_UNAVAILABLE: API returned status ${res.status}.`);
-    }
-
-    const data: any = await res.json();
+    const data = await response.json() as { choices?: Array<{ message?: { content?: unknown } }> };
     const text = data.choices?.[0]?.message?.content;
-    if (!text) {
-      throw new Error("INVALID_PROVIDER_OUTPUT: API returned empty response content.");
+    if (typeof text !== "string" || text.trim() === "") {
+      throw new AIProviderError("INVALID_PROVIDER_OUTPUT", "The AI provider returned no response content.", false);
     }
     return text;
+  }
+
+  private normalizeProviderError(error: unknown): AIProviderError {
+    if (error instanceof AIProviderError) return error;
+    const message = error instanceof Error ? error.message : String(error);
+    const knownCodes: AIProviderErrorCode[] = [
+      "RATE_LIMITED", "TIMEOUT", "AUTHENTICATION_FAILED", "MODEL_UNAVAILABLE",
+      "INVALID_REQUEST", "INVALID_PROVIDER_OUTPUT", "PROVIDER_UNAVAILABLE",
+    ];
+    const code = knownCodes.find((candidate) => message.startsWith(`${candidate}:`));
+    if (code) {
+      return new AIProviderError(
+        code,
+        message.slice(code.length + 1).trim() || "The provider request failed.",
+        code === "RATE_LIMITED" || code === "TIMEOUT" || code === "PROVIDER_UNAVAILABLE",
+      );
+    }
+    return new AIProviderError("PROVIDER_UNAVAILABLE", "The AI intent provider request failed.", true);
+  }
+
+  private async classifyHttpFailure(response: Response, providerName: string): Promise<AIProviderError> {
+    const retryAfterMs = await this.readRetryAfterMs(response);
+    let providerStatus: string | undefined;
+    try {
+      const body = await response.clone().json() as { error?: { status?: unknown } };
+      providerStatus = typeof body.error?.status === "string" ? body.error.status : undefined;
+    } catch {
+      // Raw provider response bodies are intentionally ignored.
+    }
+
+    if (response.status === 429 || providerStatus === "RESOURCE_EXHAUSTED") {
+      return new AIProviderError("RATE_LIMITED", `${providerName} quota is temporarily exhausted.`, true, retryAfterMs);
+    }
+    if (response.status === 401 || response.status === 403) {
+      return new AIProviderError("AUTHENTICATION_FAILED", `${providerName} rejected the configured credentials.`, false);
+    }
+    if (response.status === 404) {
+      return new AIProviderError("MODEL_UNAVAILABLE", `${providerName} could not find the configured model.`, false);
+    }
+    if (response.status === 400) {
+      return new AIProviderError("INVALID_REQUEST", `${providerName} rejected the configured request.`, false);
+    }
+    if (response.status === 408) {
+      return new AIProviderError("TIMEOUT", `${providerName} timed out while processing the request.`, true, retryAfterMs);
+    }
+    if (response.status >= 500) {
+      return new AIProviderError("PROVIDER_UNAVAILABLE", `${providerName} is temporarily unavailable.`, true, retryAfterMs);
+    }
+    return new AIProviderError("INVALID_REQUEST", `${providerName} rejected the request.`, false);
+  }
+
+  private async readRetryAfterMs(response: Response): Promise<number | undefined> {
+    const retryAfter = response.headers.get("retry-after");
+    if (retryAfter) {
+      const seconds = Number(retryAfter);
+      if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1_000);
+      const retryAt = Date.parse(retryAfter);
+      if (Number.isFinite(retryAt)) return Math.max(0, retryAt - Date.now());
+    }
+    try {
+      const body = await response.clone().json() as {
+        error?: { details?: Array<{ retryDelay?: unknown }> };
+      };
+      const retryDelay = body.error?.details?.find((detail) => typeof detail.retryDelay === "string")?.retryDelay;
+      if (typeof retryDelay === "string") {
+        const match = retryDelay.match(/^(\d+(?:\.\d+)?)s$/);
+        if (match) return Math.round(Number(match[1]) * 1_000);
+      }
+    } catch {
+      // Retry metadata is optional.
+    }
+    return undefined;
   }
 }

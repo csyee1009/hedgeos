@@ -11,6 +11,7 @@ interface IntentReviewProps {
   intent: StoredIntent;
   missingFields: string[];
   ambiguities: string[];
+  holdingsSource?: HoldingsSource;
 
   onUpdateIntent: (updates: {
     asset?: string;
@@ -30,6 +31,33 @@ interface IntentReviewProps {
   isSubmitting: boolean;
 
   errorMessage?: string;
+}
+
+export type HoldingsSource =
+  | "MANUAL"
+  | "PUBLIC_BASE_ADDRESS"
+  | "RECORDED_DEMO_PORTFOLIO";
+
+export function getHoldingsSourceCopy(source: HoldingsSource): {
+  label: string;
+  detail: string;
+} {
+  if (source === "RECORDED_DEMO_PORTFOLIO") {
+    return {
+      label: "Recorded demo portfolio",
+      detail: "Selected from a user-controlled demo address. Displayed balance is synthetic demo data and is not wallet-verified.",
+    };
+  }
+  if (source === "PUBLIC_BASE_ADDRESS") {
+    return {
+      label: "Public Base address",
+      detail: "Selected from a read-only public Base address balance. No wallet was connected or authorized.",
+    };
+  }
+  return {
+    label: "Manual",
+    detail: "HedgeOS is not connected to a wallet. Amounts shown here come from what you entered and are not wallet-verified.",
+  };
 }
 
 interface MissingValues {
@@ -144,11 +172,13 @@ export const IntentReview:
     intent,
     missingFields,
     ambiguities,
+    holdingsSource = "MANUAL",
     onUpdateIntent,
     onConfirmIntent,
     isSubmitting,
     errorMessage,
   }) => {
+    const holdingsSourceCopy = getHoldingsSourceCopy(holdingsSource);
     const [
       editingField,
       setEditingField,
@@ -517,7 +547,7 @@ export const IntentReview:
         >
           <strong>
             Current holdings source:
-            Manual
+            {" "}{holdingsSourceCopy.label}
           </strong>
 
           <p
@@ -530,11 +560,7 @@ export const IntentReview:
                 "var(--text-secondary)",
             }}
           >
-            HedgeOS is not connected
-            to a wallet yet. Amounts
-            shown here come from what
-            you entered and are not
-            wallet-verified.
+            {holdingsSourceCopy.detail}
           </p>
         </div>
 

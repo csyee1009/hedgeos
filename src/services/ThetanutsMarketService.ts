@@ -6,10 +6,13 @@ import {
   ThetanutsMarketProvider,
 } from "../providers/interfaces/ThetanutsMarketProvider";
 import {
+  LiveMarketExplorer,
+  LiveOptionBookOrderDTO,
   MarketQuote,
   MarketStateRecord,
   MarketStatus,
   MarketSnapshotEvidence,
+  OrderRequiredChange,
   PremiumPreview,
   PreSignRevalidationCheck,
   PreSignRevalidationStatus,
@@ -21,6 +24,12 @@ import {
   VanillaPutImplementation,
 } from "./OptionBookOrderEligibilityEngine";
 import { usdc6ForContracts6 } from "./ExactFinancialMath";
+import {
+  resolveOptionCategory,
+  resolveOrderOptionCategory,
+  OptionCategory,
+} from "./OptionCategoryResolver";
+import { OptionSizingAdapter } from "./OptionSizingAdapter";
 import { sha256Digest } from "../utils/canonicalDigest";
 
 const OPTIONBOOK_CONTRACT_SCALE = 1_000_000_000_000n;
@@ -512,40 +521,44 @@ export class ThetanutsMarketService
       config.optionImplementations || {}
     )) {
       const typed = info as any;
+      const name = String(typed?.name).toUpperCase();
+      const type = String(typed?.type).toUpperCase();
+      const numStrikes = Number(typed?.numStrikes);
 
       if (
-        String(typed?.name).toUpperCase() ===
-        "PUT" &&
-        String(typed?.type).toUpperCase() ===
-        "VANILLA" &&
-        Number(typed?.numStrikes) === 1
+        (name === "PUT" || name === "PHYSICAL_PUT") &&
+        type === "VANILLA" &&
+        numStrikes === 1
       ) {
         implementations.push({
           address,
-          name: "PUT",
+          name,
           type: "VANILLA",
           numStrikes: 1,
         });
       }
     }
 
-    const currentPut =
-      config.implementations?.PUT;
+    const putContracts = [
+      config.implementations?.PUT,
+      config.implementations?.PHYSICAL_PUT,
+    ];
 
-    if (
-      currentPut &&
-      !implementations.some(
-        (item) =>
-          item.address.toLowerCase() ===
-          String(currentPut).toLowerCase()
-      )
-    ) {
-      implementations.push({
-        address: String(currentPut),
-        name: "PUT",
-        type: "VANILLA",
-        numStrikes: 1,
-      });
+    for (const currentPut of putContracts) {
+      if (
+        currentPut &&
+        !implementations.some(
+          (item) =>
+            item.address.toLowerCase() === String(currentPut).toLowerCase()
+        )
+      ) {
+        implementations.push({
+          address: String(currentPut),
+          name: "PUT",
+          type: "VANILLA",
+          numStrikes: 1,
+        });
+      }
     }
 
     return implementations;
@@ -1824,11 +1837,304 @@ export class ThetanutsMarketService
     );
   }
 
+  public buildLiveMarketExplorer(
+    intent: TypedRiskIntent,
+    rawOrders: any[],
+    capturedAtMs = Date.now()
+  ): LiveMarketExplorer {
+    const confirmedCategory = resolveOptionCategory(intent);
+    const targetAsset = this.normalizeAssetSymbol(intent.asset.value);
+    const supportedImplementations = this.getSupportedVanillaPutImplementations();
+    const sizing = OptionSizingAdapter.resolveSizing(intent.exposureAmount.value, targetAsset);
+    const requestedQuantity18 = sizing.resolvedOptionQuantity
+      ? BigInt(sizing.resolvedOptionQuantity.amountBaseUnits)
+      : undefined;
+
+    const projected = rawOrders.map((rawOrder, offset) => {
+      const eligibility = OptionBookOrderEligibilityEngine.evaluate(
+        rawOrder,
+        supportedImplementations,
+        capturedAtMs
+      );
+      const raw = rawOrder?.rawApiData || {};
+      const normalized = rawOrder?.order || {};
+      const rawIndex = raw.index;
+      const orderIndex = typeof rawIndex === "number" ? rawIndex : offset + 1;
+      const orderId = `ob-quote-${orderIndex}`;
+      const asset = this.resolveUnderlying(rawOrder);
+      
+      const { optionRight, takerSide, category: orderCategory } = resolveOrderOptionCategory(rawOrder);
+      const categoryMatchesIntent = orderCategory === confirmedCategory;
+
+      const strikes = this.getRawStrikes(rawOrder).map((strike) => ({
+        amountBaseUnits: strike,
+        decimals: 8,
+        symbol: "USD",
+      }));
+      const expirySeconds = Number(normalized.expiry ?? raw.expiry ?? 0);
+      const deadlineSeconds = Number(raw.orderExpiryTimestamp ?? normalized.orderExpiryTimestamp ?? 0);
+      const expiryTimestampMs = Number.isFinite(expirySeconds) && expirySeconds > 0
+        ? expirySeconds * 1_000
+        : undefined;
+      const orderValidityDeadlineMs = Number.isFinite(deadlineSeconds) && deadlineSeconds > 0
+        ? deadlineSeconds * 1_000
+        : undefined;
+      const maxContracts6 = this.calculateMaxContracts(rawOrder);
+      const maxContracts18 = maxContracts6 * OPTIONBOOK_CONTRACT_SCALE;
+
+      const passed = (code: string) =>
+        eligibility.evidence.checks.some((check) => check.code === code && check.passed);
+
+      const sameAsset = asset === targetAsset;
+      const singleStrike = strikes.length === 1;
+      
+      const implementationAddress = String(raw.implementation ?? normalized.implementation ?? "");
+      const implementation = supportedImplementations.find(
+        (item) => item.address.toLowerCase() === implementationAddress.toLowerCase()
+      );
+      const implName = implementation?.name?.trim()?.toUpperCase() ?? "";
+      const supportedImplementation = Boolean(
+        implementation &&
+        (implName === "PUT" || implName === "PHYSICAL_PUT" || implName === "VANILLA_PUT" || implName.includes("PUT") || implName.includes("CALL"))
+      );
+
+      const activeDeadline = Boolean(passed("ORDER_DEADLINE") || (orderValidityDeadlineMs && orderValidityDeadlineMs > capturedAtMs));
+      const activeExpiry = Boolean(passed("OPTION_EXPIRY") || (expiryTimestampMs && expiryTimestampMs > capturedAtMs));
+      const positiveCapacity = maxContracts6 > 0n;
+
+      const hardStructure =
+        sameAsset &&
+        singleStrike &&
+        supportedImplementation &&
+        activeDeadline &&
+        activeExpiry &&
+        positiveCapacity;
+
+      const proceedable = hardStructure && categoryMatchesIntent;
+
+      const constraintChecks: LiveOptionBookOrderDTO["constraintChecks"] = [];
+      
+      let horizonShortfall = 0;
+      if (expiryTimestampMs === undefined) {
+        constraintChecks.push({ code: "HORIZON", status: "NOT_EVALUATED", details: "Option expiry is unavailable." });
+      } else {
+        const intentHorizonSec = Math.floor(intent.horizonTimestamp.value.timestampMs / 1000);
+        const expirySec = Math.floor(expiryTimestampMs / 1000);
+        horizonShortfall = Math.max(0, (intentHorizonSec - expirySec) * 1000);
+        constraintChecks.push({
+          code: "HORIZON",
+          status: horizonShortfall === 0 ? "PASS" : "FAIL",
+          details: horizonShortfall === 0
+            ? "Option expiry covers the confirmed protection horizon."
+            : `Option expires ${horizonShortfall} ms before the confirmed horizon.`,
+          ...(horizonShortfall > 0 ? { gapMs: horizonShortfall } : {}),
+        });
+      }
+
+      let quantityShortfall = 0n;
+      if (requestedQuantity18 === undefined) {
+        constraintChecks.push({ code: "QUANTITY", status: "NOT_EVALUATED", details: "Requested quantity could not be resolved exactly." });
+      } else {
+        quantityShortfall = requestedQuantity18 > maxContracts18
+          ? requestedQuantity18 - maxContracts18
+          : 0n;
+        constraintChecks.push({
+          code: "QUANTITY",
+          status: quantityShortfall === 0n ? "PASS" : "FAIL",
+          details: quantityShortfall === 0n
+            ? "Observed maker capacity covers the confirmed exposure quantity."
+            : `Observed maker capacity is short by ${quantityShortfall.toString()} in 18-decimal contract units.`,
+          ...(quantityShortfall > 0n
+            ? { gapBaseUnits: quantityShortfall.toString(), decimals: 18 }
+            : {}),
+        });
+      }
+
+      const price = normalized.price ?? raw.price;
+      let budgetStatus: "PASS" | "FAIL" | "NOT_EVALUATED" = "NOT_EVALUATED";
+      if (price !== undefined && requestedQuantity18 !== undefined && intent.maxPremiumUSDC?.value) {
+        try {
+          const maxPremiumBase = BigInt(intent.maxPremiumUSDC.value.amountBaseUnits);
+          const reqContracts6 = requestedQuantity18 / OPTIONBOOK_CONTRACT_SCALE;
+          const fillContracts6 = maxContracts6 < reqContracts6 ? maxContracts6 : reqContracts6;
+          const estPriceBase8 = BigInt(price);
+          const estCostBase6 = (estPriceBase8 * fillContracts6) / 100n;
+          if (estCostBase6 > maxPremiumBase && maxPremiumBase > 0n) {
+            budgetStatus = "FAIL";
+          } else {
+            budgetStatus = "PASS";
+          }
+        } catch {
+          budgetStatus = "NOT_EVALUATED";
+        }
+      }
+
+      constraintChecks.push({
+        code: "BUDGET",
+        status: budgetStatus,
+        details: budgetStatus === "PASS"
+          ? "Estimated contract cost is within confirmed budget limit."
+          : budgetStatus === "FAIL"
+            ? "Estimated contract cost exceeds confirmed budget limit."
+            : "Exact buyer spend evidence requires shortlisted fill preview.",
+      });
+
+      constraintChecks.push({
+        code: "PROTECTION_TARGET",
+        status: "NOT_EVALUATED",
+        details: "Modeled at-expiry protection requires complete payoff and cost evidence.",
+      });
+
+      const matchesCurrentGoal = categoryMatchesIntent && hardStructure && horizonShortfall === 0 && quantityShortfall === 0n && budgetStatus !== "FAIL";
+
+      const diagnostics = {
+        categoryMatch: categoryMatchesIntent,
+        hardStructure,
+        horizon: (expiryTimestampMs === undefined ? "NOT_EVALUATED" : horizonShortfall === 0 ? "PASS" : "FAIL") as any,
+        quantity: (requestedQuantity18 === undefined ? "NOT_EVALUATED" : quantityShortfall === 0n ? "PASS" : "FAIL") as any,
+        budget: budgetStatus,
+        target: "NOT_EVALUATED" as const,
+        finalMatch: matchesCurrentGoal,
+      };
+
+      const rejectionReasons: string[] = [];
+      if (!sameAsset) rejectionReasons.push(`Underlying ${asset} does not match confirmed asset ${targetAsset}.`);
+      if (!categoryMatchesIntent) rejectionReasons.push(`Order category ${orderCategory} does not match confirmed category ${confirmedCategory}.`);
+      if (horizonShortfall > 0) rejectionReasons.push(`Option expires before confirmed horizon.`);
+      if (quantityShortfall > 0n) rejectionReasons.push(`Maker capacity is short of requested exposure.`);
+      if (budgetStatus === "FAIL") rejectionReasons.push(`Estimated cost exceeds confirmed budget.`);
+
+      const whyConsider: string[] = [];
+      const whyNotConsider: string[] = [];
+      const requiredChanges: OrderRequiredChange[] = [];
+
+      if (sameAsset) whyConsider.push(`Same underlying asset (${targetAsset})`);
+      else whyNotConsider.push(`Underlying ${asset} does not match confirmed asset ${targetAsset}`);
+
+      if (categoryMatchesIntent) whyConsider.push(`Matches confirmed strategy category (${confirmedCategory})`);
+      else whyNotConsider.push(`Order is ${orderCategory} instead of confirmed category ${confirmedCategory}`);
+
+      if (horizonShortfall === 0) whyConsider.push("Option expiry covers confirmed horizon");
+      else {
+        whyNotConsider.push(`Option expires before confirmed horizon`);
+        if (expiryTimestampMs) {
+          requiredChanges.push({
+            field: "Horizon",
+            currentValue: intent.horizonTimestamp.value.formattedDisplay,
+            candidateRequirement: `No later than candidate expiry: ${new Date(expiryTimestampMs).toISOString().slice(0, 10)}`,
+          });
+        }
+      }
+
+      if (quantityShortfall === 0n) whyConsider.push("Capacity covers requested exposure");
+      else {
+        whyNotConsider.push("Capacity short of requested exposure");
+        requiredChanges.push({
+          field: "Exposure / Quantity",
+          currentValue: `${intent.exposureAmount.value.amountBaseUnits} (${intent.exposureAmount.value.symbol})`,
+          candidateRequirement: `At most available maker capacity: ${maxContracts6.toString()} contracts`,
+        });
+      }
+
+      const hardFailureReasons: string[] = [];
+      if (!sameAsset) hardFailureReasons.push(`Underlying asset ${asset} does not match confirmed asset ${targetAsset}`);
+      if (!categoryMatchesIntent) hardFailureReasons.push(`Order category ${orderCategory} does not match confirmed ${confirmedCategory}`);
+      if (!supportedImplementation) hardFailureReasons.push("Implementation is not on the supported vanilla PUT allowlist");
+      if (!activeDeadline) hardFailureReasons.push("Order signing deadline is expired or inactive");
+      if (!activeExpiry) hardFailureReasons.push("Option is expired");
+      if (maxContracts6 <= 0n) hardFailureReasons.push("Zero available maker capacity");
+
+      const dto: LiveOptionBookOrderDTO = {
+        orderId,
+        asset,
+        optionRight,
+        takerSide,
+        optionCategory: orderCategory,
+        categoryMatchesIntent,
+        matchesCurrentGoal,
+        diagnostics,
+        strikes,
+        ...(expiryTimestampMs !== undefined ? { expiryTimestampMs } : {}),
+        ...(orderValidityDeadlineMs !== undefined ? { orderValidityDeadlineMs } : {}),
+        ...(price !== undefined ? { pricePerContract: { amountBaseUnits: String(price), decimals: 8, symbol: "USDC" } } : {}),
+        ...(maxContracts6 > 0n ? { availableCapacity: { amountBaseUnits: maxContracts6.toString(), decimals: 6, symbol: "CONTRACTS" } } : {}),
+        activeStatus: (!activeExpiry || !activeDeadline) ? "EXPIRED" : "ACTIVE",
+        structureLabel: `${orderCategory.replace("_", " ")} · SINGLE STRIKE`,
+        eligibilityStatus: matchesCurrentGoal ? "ELIGIBLE" : proceedable ? "CLOSEST" : "OTHER",
+        proceedable,
+        proceedabilityStatus: proceedable ? "PROCEEDABLE" : "HARD_INCOMPATIBLE",
+        hardFailureReasons,
+        rejectionReasons,
+        constraintChecks,
+        whyConsider,
+        whyNotConsider,
+        requiredChanges,
+      };
+
+      return {
+        dto,
+        categoryMatchesIntent,
+        proceedable,
+        matchesCurrentGoal,
+        failedCount: constraintChecks.filter((check) => check.status === "FAIL").length,
+        horizonShortfall,
+        quantityShortfall,
+        liquidityHeadroom: requestedQuantity18 === undefined ? 0n : maxContracts18 - requestedQuantity18,
+      };
+    });
+
+    const sameCategoryProceedable = projected.filter(item => item.categoryMatchesIntent && item.proceedable);
+    
+    const matchingItems = sameCategoryProceedable.filter(item => item.matchesCurrentGoal);
+    const matching: LiveOptionBookOrderDTO[] = matchingItems.map((item) => ({
+      ...item.dto,
+      eligibilityStatus: "ELIGIBLE" as const,
+    }));
+
+    const closestCandidates = sameCategoryProceedable
+      .filter(item => !item.matchesCurrentGoal)
+      .sort((left, right) =>
+        left.failedCount - right.failedCount ||
+        left.horizonShortfall - right.horizonShortfall ||
+        (left.quantityShortfall < right.quantityShortfall ? -1 : left.quantityShortfall > right.quantityShortfall ? 1 : 0) ||
+        (left.liquidityHeadroom > right.liquidityHeadroom ? -1 : left.liquidityHeadroom < right.liquidityHeadroom ? 1 : 0) ||
+        left.dto.orderId.localeCompare(right.dto.orderId)
+      );
+
+    const closest: LiveOptionBookOrderDTO[] = closestCandidates
+      .slice(0, 3)
+      .map((item) => ({
+        ...item.dto,
+        eligibilityStatus: "CLOSEST" as const,
+      }));
+
+    const eligibleInMyCategory: LiveOptionBookOrderDTO[] = sameCategoryProceedable.map(item => item.dto);
+    const proceedableOrders: LiveOptionBookOrderDTO[] = projected.filter(item => item.proceedable).map(item => item.dto);
+
+    return {
+      source: "THETANUTS_OPTIONBOOK_API",
+      readOnly: true,
+      capturedAtMs,
+      confirmedCategory,
+      liveOrderCount: rawOrders.length,
+      matchingCount: matching.length,
+      closestCount: closest.length,
+      eligibleInMyCategoryCount: eligibleInMyCategory.length,
+      proceedableCount: proceedableOrders.length,
+      allLiveDisplayedCount: projected.length,
+      matching,
+      closest,
+      eligibleInMyCategory,
+      proceedable: proceedableOrders,
+      allLive: projected.map((item) => item.dto),
+    };
+  }
+
   public async fetchMarketQuotes(
-    intent: TypedRiskIntent
+    intent: TypedRiskIntent,
+    suppliedRawOrders?: any[]
   ): Promise<MarketQuote[]> {
-    const rawOrders =
-      await this.fetchRawOrders();
+    const rawOrders = suppliedRawOrders ?? await this.fetchRawOrders();
 
     const targetAsset =
       this.normalizeAssetSymbol(

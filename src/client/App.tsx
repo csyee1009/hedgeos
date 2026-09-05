@@ -9,6 +9,8 @@ import {
   ExecutionCommitment,
   ExternalHumanAuthorizationHandoff,
   HumanReviewRecord,
+  LiveMarketExplorer,
+  LiveOptionBookOrderDTO,
   MarketStateRecord,
   PolicyDecisionRecord,
   RFQReasonCode,
@@ -18,13 +20,15 @@ import {
   StoredIntent,
   TypedRiskIntent,
 } from "../types";
-import { CandidateList } from "./components/CandidateList";
+import { CandidateList, RevalidationFailureInfo } from "./components/CandidateList";
 import { ConfirmedIntentView } from "./components/ConfirmedIntentView";
 import { IntentReview } from "./components/IntentReview";
+import type { HoldingsSource } from "./components/IntentReview";
 import { OutcomeInput } from "./components/OutcomeInput";
 import { PortfolioOnboarding } from "./components/PortfolioOnboarding";
 import { SimpleDiscovery } from "./components/SimpleDiscovery";
 import { ExternalExecutionPanel } from "./components/ExternalExecutionPanel";
+import hedgeLogo from "../../logo.png";
 
 export type UIState =
   | "EMPTY"
@@ -37,6 +41,38 @@ export type UIState =
   | "ERROR";
 
 export type EntryMode = "ONBOARDING" | "SIMPLE" | "ADVANCED" | "ADVANCED_INPUT";
+
+export interface ParseFailureState {
+  uiState: "ERROR";
+  errorMessage: string;
+}
+
+export function buildParseFailureState(error: unknown): ParseFailureState {
+  const fallback = "We couldn't interpret your protection goal right now. Please try again.";
+  const errorMessage =
+    error instanceof Error && error.message.trim() !== ""
+      ? error.message
+      : fallback;
+  return { uiState: "ERROR", errorMessage };
+}
+
+export function buildResetSolverState(): {
+  candidates: CandidateStrategy[];
+  rejectedCandidates: CandidateStrategy[];
+  rfqRequirement: undefined;
+  rfqSpecification: undefined;
+  errorMessage: undefined;
+  solverMode: "OPTIONBOOK_AVAILABLE";
+} {
+  return {
+    candidates: [],
+    rejectedCandidates: [],
+    rfqRequirement: undefined,
+    rfqSpecification: undefined,
+    errorMessage: undefined,
+    solverMode: "OPTIONBOOK_AVAILABLE",
+  };
+}
 
 const normalizeAmbiguities = (
   value: unknown
@@ -120,6 +156,8 @@ export default function App() {
 
   const [entryMode, setEntryMode] = useState<EntryMode>("ONBOARDING");
   const [sourceNotice, setSourceNotice] = useState<string | undefined>(undefined);
+  const [holdingsSource, setHoldingsSource] = useState<HoldingsSource>("MANUAL");
+  const [marketExplorer, setMarketExplorer] = useState<LiveMarketExplorer | undefined>(undefined);
 
   const [
     promptText,
@@ -261,6 +299,14 @@ export default function App() {
     setIsSolving,
   ] = useState(false);
 
+  const [
+    revalidationFailure,
+    setRevalidationFailure,
+  ] = useState<RevalidationFailureInfo | null>(null);
+
+  const [acceptedCandidate, setAcceptedCandidate] = useState<CandidateStrategy | null>(null);
+  const [baseConfirmedIntent, setBaseConfirmedIntent] = useState<StoredIntent | null>(null);
+
   useEffect(() => {
     document.documentElement.setAttribute(
       "data-theme",
@@ -321,8 +367,7 @@ export default function App() {
         }
       );
 
-      const data =
-        await response.json();
+      const data = await response.json().catch(() => ({}));
 
       if (!response.ok) {
         throw new Error(
@@ -368,12 +413,10 @@ export default function App() {
           "READY_FOR_CONFIRMATION"
         );
       }
-    } catch {
-      setErrorMessage(
-        "We couldn't interpret your protection goal right now. Please try again."
-      );
-
-      setUiState("ERROR");
+    } catch (error) {
+      const failure = buildParseFailureState(error);
+      setErrorMessage(failure.errorMessage);
+      setUiState(failure.uiState);
     }
   };
 
@@ -498,6 +541,9 @@ export default function App() {
         setIntent(
           data.confirmedIntent
         );
+        setBaseConfirmedIntent(
+          JSON.parse(JSON.stringify(data.confirmedIntent))
+        );
 
         setUiState("CONFIRMED");
       } catch (error: any) {
@@ -510,22 +556,110 @@ export default function App() {
       }
     };
 
+  const restoreBaseConfirmedIntent = async (): Promise<StoredIntent | null> => {
+    if (
+      !baseConfirmedIntent ||
+      !baseConfirmedIntent.maxPremiumUSDC?.value ||
+      !baseConfirmedIntent.targetMaxLossPercent ||
+      !baseConfirmedIntent.horizonTimestamp?.value
+    ) {
+      return intent;
+    }
+
+    const currentTarget = intent?.targetMaxLossPercent?.value;
+    const baseTarget = baseConfirmedIntent.targetMaxLossPercent?.value;
+    const currentBudgetBase = intent?.maxPremiumUSDC?.value?.amountBaseUnits;
+    const baseBudgetBase = baseConfirmedIntent.maxPremiumUSDC.value.amountBaseUnits;
+    const currentHorizon = intent?.horizonTimestamp?.value?.timestampMs;
+    const baseHorizon = baseConfirmedIntent.horizonTimestamp.value.timestampMs;
+
+    const isDifferent =
+      currentTarget !== baseTarget ||
+      currentBudgetBase !== baseBudgetBase ||
+      currentHorizon !== baseHorizon ||
+      intent?.targetMaxLossPercent?.source === "USER_ACCEPTED_LIVE_CONTRACT";
+
+    if (!isDifferent) {
+      return baseConfirmedIntent;
+    }
+
+    try {
+      // 1. Try server restore-base endpoint first
+      const restoreRes = await fetch(`/api/v1/intents/${baseConfirmedIntent.intentId}/restore-base`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      if (restoreRes.ok) {
+        const restoreData = await restoreRes.json();
+        if (restoreData.restoredIntent) {
+          setIntent(restoreData.restoredIntent);
+          return restoreData.restoredIntent;
+        }
+      }
+
+      // 2. Fallback to PATCH + confirm with base values
+      const budgetBase = BigInt(baseConfirmedIntent.maxPremiumUSDC.value.amountBaseUnits);
+      const budgetDecimals = baseConfirmedIntent.maxPremiumUSDC.value.decimals;
+      const scale = 10n ** BigInt(budgetDecimals);
+      const integerPart = budgetBase / scale;
+      const fracPart = budgetBase % scale;
+      const budgetString = fracPart === 0n
+        ? integerPart.toString()
+        : `${integerPart.toString()}.${fracPart.toString().padStart(budgetDecimals, "0").replace(/0+$/, "")}`;
+
+      const patchRes = await fetch(`/api/v1/intents/${baseConfirmedIntent.intentId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          targetMaxLossPercent: baseConfirmedIntent.targetMaxLossPercent.value,
+          maxPremiumUSDC: { amount: budgetString },
+          horizonTimestampMs: baseConfirmedIntent.horizonTimestamp.value.timestampMs,
+          source: "USER_EXPLICIT",
+        }),
+      });
+      const patchData = await patchRes.json();
+      if (patchRes.ok && patchData.candidateIntent) {
+        const confirmRes = await fetch(`/api/v1/intents/${baseConfirmedIntent.intentId}/confirm`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ expectedVersion: patchData.candidateIntent.version }),
+        });
+        const confirmData = await confirmRes.json();
+        if (confirmRes.ok && confirmData.confirmedIntent) {
+          setIntent(confirmData.confirmedIntent);
+          return confirmData.confirmedIntent;
+        }
+      }
+    } catch (e) {
+      console.error("Failed to restore base intent on server:", e);
+    }
+
+    setIntent(baseConfirmedIntent);
+    return baseConfirmedIntent;
+  };
+
   const handleSolveProtection =
-    async () => {
+    async (intentToSolve?: any) => {
+      const explicitIntent = intentToSolve && intentToSolve.intentId ? (intentToSolve as StoredIntent) : undefined;
+      const activeIntent = explicitIntent || (await restoreBaseConfirmedIntent());
+      const targetIntent = activeIntent || baseConfirmedIntent || intent;
+
       if (
-        !intent ||
-        !intent.confirmedByUser
+        !targetIntent ||
+        !targetIntent.confirmedByUser
       ) {
         return;
       }
 
       setIsSolving(true);
       setErrorMessage(undefined);
+      setRevalidationFailure(null);
+      setAcceptedCandidate(null);
 
       try {
         const response =
           await fetch(
-            `/api/v1/intents/${intent.intentId}/solve`,
+            `/api/v1/intents/${targetIntent.intentId}/solve`,
             {
               method: "POST",
               headers: {
@@ -565,6 +699,10 @@ export default function App() {
 
         setRfqSpecification(
           data.rfqSpecification
+        );
+
+        setMarketExplorer(
+          data.marketExplorer
         );
 
         setActionProposal(
@@ -614,29 +752,192 @@ export default function App() {
       }
     };
 
-  const handleReset = () => {
-    setPromptText("");
-    setIntent(null);
-    setMissingFields([]);
-    setAmbiguities([]);
+  const handleAcceptContract = async (
+    order: LiveOptionBookOrderDTO,
+    updates: {
+      maxPremiumUSDC?: { amount: string };
+      horizonTimestampMs?: number;
+    }
+  ) => {
+    if (!intent) return;
+    setIsSolving(true);
     setErrorMessage(undefined);
-    setCandidates([]);
-    setRejectedCandidates([]);
+    setRevalidationFailure(null);
+    setAcceptedCandidate(null);
+
+    try {
+      const patchRes = await fetch(`/api/v1/intents/${intent.intentId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...updates,
+          source: "USER_ACCEPTED_LIVE_CONTRACT",
+        }),
+      });
+      const patchData = await patchRes.json();
+      if (!patchRes.ok) {
+        throw new Error(patchData.error || "Failed to update protection goal for accepted contract.");
+      }
+
+      const updatedCandidateIntent = patchData.candidateIntent;
+      setIntent(updatedCandidateIntent);
+
+      const confirmRes = await fetch(`/api/v1/intents/${updatedCandidateIntent.intentId}/confirm`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ expectedVersion: updatedCandidateIntent.version }),
+      });
+      const confirmData = await confirmRes.json();
+      if (!confirmRes.ok) {
+        throw new Error(confirmData.error || "Failed to confirm updated protection goal.");
+      }
+
+      setIntent(confirmData.confirmedIntent);
+
+      const solveRes = await fetch(`/api/v1/intents/${confirmData.confirmedIntent.intentId}/solve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      const solveData = await solveRes.json();
+      if (!solveRes.ok) {
+        throw new Error(solveData.error || "Failed to revalidate live market options.");
+      }
+
+      setSolverMode(solveData.mode || "OPTIONBOOK_AVAILABLE");
+      setCandidates(solveData.rankedStrategies || []);
+      setRejectedCandidates(solveData.rejectedCandidates || []);
+      setRfqRequirement(solveData.rfqRequirement);
+      setRfqSpecification(solveData.rfqSpecification);
+      setMarketExplorer(solveData.marketExplorer);
+      setActionProposal(solveData.actionProposal);
+      setSimulationResult(solveData.simulationResult);
+      setHumanReviewRecord(solveData.humanReviewRecord);
+      setAuthorizationAttestation(solveData.authorizationAttestation);
+      setExecutionCommitment(solveData.executionCommitment);
+      setExternalHumanAuthorizationHandoff(solveData.externalHumanAuthorizationHandoff);
+      setPolicyDecisions(solveData.policyDecisions || {});
+      if (solveData.marketState) setMarketState(solveData.marketState);
+
+      const verifiedCandidate = (solveData.rankedStrategies || []).find((c: CandidateStrategy) =>
+        c.quotes?.some((q) => q.quoteId === order.orderId)
+      );
+
+      if (verifiedCandidate && verifiedCandidate.status === "TECHNICALLY_FEASIBLE") {
+        setCandidates([verifiedCandidate, ...(solveData.rankedStrategies || []).filter((c: CandidateStrategy) => c.strategyId !== verifiedCandidate.strategyId)]);
+        setAcceptedCandidate(verifiedCandidate);
+        setRevalidationFailure(null);
+        setErrorMessage(undefined);
+      } else {
+        const freshMarket = solveData.marketExplorer as LiveMarketExplorer | undefined;
+        const freshOrder = freshMarket?.allLive.find((o) => o.orderId === order.orderId);
+
+        let failureInfo: RevalidationFailureInfo;
+
+        if (!freshOrder) {
+          failureInfo = {
+            orderId: order.orderId,
+            reasonCode: "ORDER_DISAPPEARED",
+            explanation: `The selected order '${order.orderId}' is no longer available in the live Thetanuts OptionBook.`,
+          };
+        } else if (freshOrder.activeStatus === "EXPIRED" || (freshOrder.expiryTimestampMs && freshOrder.expiryTimestampMs < Date.now())) {
+          failureInfo = {
+            orderId: order.orderId,
+            reasonCode: "ORDER_EXPIRED",
+            explanation: `The selected order '${order.orderId}' has expired and can no longer be accepted.`,
+          };
+        } else if (freshOrder.availableCapacity && BigInt(freshOrder.availableCapacity.amountBaseUnits) === 0n) {
+          failureInfo = {
+            orderId: order.orderId,
+            reasonCode: "INSUFFICIENT_CAPACITY",
+            explanation: `Maker available capacity for '${order.orderId}' has dropped below your requested exposure quantity.`,
+          };
+        } else {
+          const rejected = (solveData.rejectedCandidates || []).find((c: CandidateStrategy) =>
+            c.quotes?.some((q) => q.quoteId === order.orderId)
+          );
+          const reasonText = rejected?.rejectionReasons?.join("; ") || "Order terms or conditions changed.";
+          failureInfo = {
+            orderId: order.orderId,
+            reasonCode: "ORDER_CHANGED",
+            explanation: `Revalidation failed for order '${order.orderId}': ${reasonText}`,
+          };
+        }
+
+        setAcceptedCandidate(null);
+        setRevalidationFailure(failureInfo);
+        setErrorMessage(undefined);
+      }
+
+      setUiState("SOLVED");
+    } catch (error: any) {
+      setErrorMessage(error.message || "Failed to process accepted contract.");
+      setUiState("CONFIRMED");
+    } finally {
+      setIsSolving(false);
+    }
+  };
+
+  const handleEditGoal = () => {
+    const resetSolverState = buildResetSolverState();
+    setRevalidationFailure(null);
+    setAcceptedCandidate(null);
+    setErrorMessage(resetSolverState.errorMessage);
+    setCandidates(resetSolverState.candidates);
+    setRejectedCandidates(resetSolverState.rejectedCandidates);
     setPolicyDecisions({});
-    setRfqRequirement(undefined);
-    setRfqSpecification(undefined);
+    setRfqRequirement(resetSolverState.rfqRequirement);
+    setRfqSpecification(resetSolverState.rfqSpecification);
+    setMarketExplorer(undefined);
     setActionProposal(undefined);
     setSimulationResult(undefined);
     setHumanReviewRecord(undefined);
     setAuthorizationAttestation(undefined);
     setExecutionCommitment(undefined);
     setExternalHumanAuthorizationHandoff(undefined);
-    setSolverMode(
-      "OPTIONBOOK_AVAILABLE"
-    );
+    setSolverMode(resetSolverState.solverMode);
+
+    if (baseConfirmedIntent) {
+      setIntent(baseConfirmedIntent);
+    }
+
+    if (intent || baseConfirmedIntent) {
+      setUiState(
+        missingFields.length > 0
+          ? "NEEDS_CLARIFICATION"
+          : "READY_FOR_CONFIRMATION"
+      );
+    } else {
+      setUiState("EMPTY");
+    }
+  };
+
+  const handleReset = () => {
+    const resetSolverState = buildResetSolverState();
+    setPromptText("");
+    setIntent(null);
+    setBaseConfirmedIntent(null);
+    setMissingFields([]);
+    setAmbiguities([]);
+    setRevalidationFailure(null);
+    setAcceptedCandidate(null);
+    setErrorMessage(resetSolverState.errorMessage);
+    setCandidates(resetSolverState.candidates);
+    setRejectedCandidates(resetSolverState.rejectedCandidates);
+    setPolicyDecisions({});
+    setRfqRequirement(resetSolverState.rfqRequirement);
+    setRfqSpecification(resetSolverState.rfqSpecification);
+    setMarketExplorer(undefined);
+    setActionProposal(undefined);
+    setSimulationResult(undefined);
+    setHumanReviewRecord(undefined);
+    setAuthorizationAttestation(undefined);
+    setExecutionCommitment(undefined);
+    setExternalHumanAuthorizationHandoff(undefined);
+    setSolverMode(resetSolverState.solverMode);
     setUiState("EMPTY");
     setEntryMode("ONBOARDING");
     setSourceNotice(undefined);
+    setHoldingsSource("MANUAL");
   };
 
   const isLiveMarket =
@@ -678,9 +979,11 @@ export default function App() {
       <header className="app-header">
         <div className="header-container">
           <div className="brand-box">
-            <span className="brand-logo">
-              🛡️ HedgeOS
-            </span>
+            <img
+              src={hedgeLogo}
+              alt="HedgeOS"
+              className="brand-logo-image"
+            />
 
             <span className="brand-tagline">
               Protect outcomes, not
@@ -848,10 +1151,14 @@ export default function App() {
                   />
                 ) : entryMode === "ADVANCED" ? (
                   <PortfolioOnboarding
-                    onSelectManual={() => setEntryMode("ADVANCED_INPUT")}
-                    onSelectPrefilledAmount={(prompt, notice) => {
+                    onSelectManual={() => {
+                      setHoldingsSource("MANUAL");
+                      setEntryMode("ADVANCED_INPUT");
+                    }}
+                    onSelectPrefilledAmount={(prompt, notice, source) => {
                       setPromptText(prompt);
                       setSourceNotice(notice);
+                      setHoldingsSource(source);
                       setEntryMode("ADVANCED_INPUT");
                     }}
                   />
@@ -883,6 +1190,9 @@ export default function App() {
                 }
                 ambiguities={
                   ambiguities
+                }
+                holdingsSource={
+                  holdingsSource
                 }
                 onUpdateIntent={
                   handleUpdateIntent
@@ -942,6 +1252,9 @@ export default function App() {
                 rfqSpecification={
                   rfqSpecification
                 }
+                marketExplorer={
+                  marketExplorer
+                }
                 actionProposal={
                   actionProposal
                 }
@@ -969,15 +1282,45 @@ export default function App() {
                 isSolving={
                   isSolving
                 }
+                revalidationFailure={
+                  revalidationFailure
+                }
                 onReset={
                   handleReset
                 }
-                onRefresh={
-                  handleSolveProtection
+                onRefresh={async () => {
+                  setRevalidationFailure(null);
+                  setAcceptedCandidate(null);
+                  setErrorMessage(undefined);
+                  const restored = await restoreBaseConfirmedIntent();
+                  await handleSolveProtection(restored || undefined);
+                }}
+                onEditGoal={
+                  handleEditGoal
+                }
+                onChooseAnotherContract={async () => {
+                  setRevalidationFailure(null);
+                  setAcceptedCandidate(null);
+                  setErrorMessage(undefined);
+                  const restored = await restoreBaseConfirmedIntent();
+                  await handleSolveProtection(restored || undefined);
+                }}
+                onAcceptContract={
+                  handleAcceptContract
                 }
               />
-              {candidates[0] && candidates[0].status === "TECHNICALLY_FEASIBLE" && (
-                <ExternalExecutionPanel intent={intent as TypedRiskIntent} candidate={candidates[0]} />
+              {acceptedCandidate && acceptedCandidate.status === "TECHNICALLY_FEASIBLE" && !revalidationFailure && (
+                <ExternalExecutionPanel
+                  intent={intent as TypedRiskIntent}
+                  candidate={acceptedCandidate}
+                  onBackToMarket={async () => {
+                    setAcceptedCandidate(null);
+                    setRevalidationFailure(null);
+                    setErrorMessage(undefined);
+                    const restored = await restoreBaseConfirmedIntent();
+                    await handleSolveProtection(restored || undefined);
+                  }}
+                />
               )}
               </>
             )}

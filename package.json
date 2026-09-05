@@ -1,5 +1,5 @@
 {
-  "name": "2",
+  "name": "hedgeos",
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
@@ -11,7 +11,8 @@
     "start:server": "tsx src/server/index.ts",
     "dev:client": "vite",
     "check": "npx tsc --noEmit && npm run test && npm run build:client",
-    "security:audit": "npm audit --audit-level=high"
+    "security:audit": "npm audit --audit-level=high",
+    "start": "tsx src/server/index.ts"
   },
   "keywords": [],
   "author": "",
@@ -27,7 +28,8 @@
     "helmet": "^8.3.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
-    "zod": "^4.5.4"
+    "zod": "^4.5.4",
+    "tsx": "^4.23.13"
   },
   "devDependencies": {
     "@types/cors": "^2.8.19",

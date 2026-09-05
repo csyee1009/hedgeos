@@ -2,6 +2,7 @@ export type RiskObjective = "DOWNSIDE_PROTECTION";
 
 export type FieldProvenanceSource =
   | "USER_EXPLICIT"
+  | "USER_ACCEPTED_LIVE_CONTRACT"
   | "AI_INFERRED"
   | "PARSER_INFERRED"
   | "SYSTEM_DEFAULT";
@@ -124,6 +125,15 @@ export interface LLMIntentExtractionDTO {
   clarificationQuestions?: string[];
 }
 
+export interface BaseConfirmedGoal {
+  asset: string;
+  exposureAmount: TokenAmount;
+  targetMaxLossPercent: number;
+  maxPremiumUSDC: TokenAmount;
+  horizonTimestamp: HorizonTarget;
+  allowMultiLeg?: boolean;
+}
+
 export interface ParsedRiskIntentDraft {
   intentId: string;
   version: number;
@@ -151,6 +161,8 @@ export interface ParsedRiskIntentDraft {
   confirmedByUser: boolean;
   confirmedAtMs?: number;
 
+  baseConfirmedGoal?: BaseConfirmedGoal;
+
   originalPromptText?: string;
   providerMetadata?: LLMProviderMetadata;
 }
@@ -177,6 +189,12 @@ export interface TypedRiskIntent {
 
   allowedProtocols: FieldProvenance<string[]>;
   allowMultiLeg: FieldProvenance<boolean>;
+
+  baseConfirmedGoal?: BaseConfirmedGoal;
+
+  optionCategory?: FieldProvenance<OptionCategory>;
+  optionRight?: FieldProvenance<OptionRight>;
+  positionSide?: FieldProvenance<LegSide>;
 
   originalPromptText?: string;
 }
@@ -290,6 +308,80 @@ export interface MarketQuote {
   orderValidityDeadlineMs?: number;
 
   eligibilityEvidence?: OrderEligibilityEvidence;
+}
+
+export type MarketExplorerCheckStatus = "PASS" | "FAIL" | "NOT_EVALUATED";
+
+export interface MarketExplorerConstraintCheck {
+  code: string;
+  status: MarketExplorerCheckStatus;
+  details: string;
+  gapMs?: number;
+  gapBaseUnits?: string;
+  decimals?: number;
+}
+
+export interface OrderRequiredChange {
+  field: string;
+  currentValue: string;
+  candidateRequirement: string;
+}
+
+export type OptionCategory = "LONG_PUT" | "SHORT_PUT" | "LONG_CALL" | "SHORT_CALL";
+
+export interface CategoryMatchDiagnostics {
+  categoryMatch: boolean;
+  hardStructure: boolean;
+  horizon: "PASS" | "FAIL" | "NOT_EVALUATED";
+  quantity: "PASS" | "FAIL" | "NOT_EVALUATED";
+  budget: "PASS" | "FAIL" | "NOT_EVALUATED";
+  target: "PASS" | "FAIL" | "NOT_EVALUATED";
+  finalMatch: boolean;
+}
+
+export interface LiveOptionBookOrderDTO {
+  orderId: string;
+  asset: string;
+  optionRight: "PUT" | "CALL" | "UNKNOWN";
+  takerSide?: "BUY" | "SELL";
+  optionCategory?: OptionCategory;
+  categoryMatchesIntent?: boolean;
+  matchesCurrentGoal?: boolean;
+  strikes: TokenAmount[];
+  expiryTimestampMs?: number;
+  orderValidityDeadlineMs?: number;
+  pricePerContract?: TokenAmount;
+  availableCapacity?: TokenAmount;
+  activeStatus: "ACTIVE" | "EXPIRED" | "INVALID";
+  structureLabel: string;
+  eligibilityStatus: "ELIGIBLE" | "CLOSEST" | "CLOSEST_INCOMPATIBLE" | "OTHER";
+  proceedable: boolean;
+  proceedabilityStatus: "PROCEEDABLE" | "HARD_INCOMPATIBLE";
+  hardFailureReasons: string[];
+  rejectionReasons: string[];
+  constraintChecks: MarketExplorerConstraintCheck[];
+  diagnostics?: CategoryMatchDiagnostics;
+  whyConsider: string[];
+  whyNotConsider: string[];
+  requiredChanges: OrderRequiredChange[];
+}
+
+export interface LiveMarketExplorer {
+  source: "THETANUTS_OPTIONBOOK_API";
+  readOnly: true;
+  capturedAtMs: number;
+  confirmedCategory?: OptionCategory;
+  liveOrderCount: number;
+  matchingCount: number;
+  closestCount: number;
+  eligibleInMyCategoryCount?: number;
+  proceedableCount: number;
+  allLiveDisplayedCount: number;
+  matching: LiveOptionBookOrderDTO[];
+  closest: LiveOptionBookOrderDTO[];
+  eligibleInMyCategory?: LiveOptionBookOrderDTO[];
+  proceedable: LiveOptionBookOrderDTO[];
+  allLive: LiveOptionBookOrderDTO[];
 }
 
 export type CandidateStatus =

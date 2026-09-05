@@ -1,9 +1,14 @@
 import React, { useState } from "react";
 import { PortfolioTokenBalance, ReadOnlyPortfolioSnapshot } from "../../types";
+import type { HoldingsSource } from "./IntentReview";
 
 export interface PortfolioOnboardingProps {
   onSelectManual: () => void;
-  onSelectPrefilledAmount: (prompt: string, notice?: string) => void;
+  onSelectPrefilledAmount: (
+    prompt: string,
+    notice: string | undefined,
+    source: HoldingsSource,
+  ) => void;
 }
 
 type OnboardingStep = "CHOICE" | "ADDRESS_INPUT" | "SNAPSHOT_RESULT";
@@ -86,7 +91,19 @@ export const PortfolioOnboarding: React.FC<PortfolioOnboardingProps> = ({
       normalizationNotice = `Amount selected from ${b.formattedAmount} ${b.displaySymbol} on the public address.`;
     }
 
-    onSelectPrefilledAmount(prefillPrompt, normalizationNotice);
+    const isDemoPortfolio = snapshot?.warnings?.some((warning) =>
+      warning.includes("RECORDED DEMO PORTFOLIO")
+    ) === true;
+
+    if (isDemoPortfolio) {
+      normalizationNotice = "Selected from a user-controlled demo address. Displayed balance is synthetic demo data and is not wallet-verified.";
+    }
+
+    onSelectPrefilledAmount(
+      prefillPrompt,
+      normalizationNotice,
+      isDemoPortfolio ? "RECORDED_DEMO_PORTFOLIO" : "PUBLIC_BASE_ADDRESS",
+    );
   };
 
   const truncateAddress = (addr: string) =>

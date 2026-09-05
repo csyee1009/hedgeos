@@ -207,11 +207,10 @@ export class OptionBookOrderEligibilityEngine {
           implementationAddress
       );
 
+    const implName = implementation?.name?.trim()?.toUpperCase() ?? "";
     const implementationEligible = Boolean(
       implementation &&
-      implementation.name
-        .trim()
-        .toUpperCase() === "PUT" &&
+      (implName === "PUT" || implName === "PHYSICAL_PUT") &&
       implementation.type
         .trim()
         .toUpperCase() === "VANILLA" &&

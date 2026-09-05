@@ -1,6 +1,10 @@
 import dns from "dns";
 dns.setDefaultResultOrder("ipv4first");
 
+import path from "path";
+import fs from "fs";
+import { fileURLToPath } from "url";
+
 import "dotenv/config";
 import cors from "cors";
 import express from "express";
@@ -19,6 +23,10 @@ import {
 } from "../fixtures/mockQuotes";
 
 import { IntentProviderFactory } from "../providers/IntentProviderFactory";
+import {
+  AIProviderError,
+  AIProviderErrorCode,
+} from "../providers/RealLLMIntentProvider";
 
 import {
   IntentRepository,
@@ -54,8 +62,10 @@ import {
 
 import {
   ActionProposal,
+  BaseConfirmedGoal,
   CandidateStrategy,
   DiscoveryCandidate,
+  LiveMarketExplorer,
   ParsedRiskIntentDraft,
   ProtectionSituation,
   StoredIntent,
@@ -122,17 +132,11 @@ if (allowedOriginsEnv) {
     "http://localhost:5173",
     "http://127.0.0.1:5173",
   ];
-}
-
-if (
-  isProd &&
-  allowedOrigins.length === 0
-) {
-  console.error(
-    "FATAL: HEDGEOS_ALLOWED_ORIGINS must be configured in production."
-  );
-
-  process.exit(1);
+} else {
+  allowedOrigins = [
+    `http://localhost:${process.env.PORT || 3000}`,
+    `http://127.0.0.1:${process.env.PORT || 3000}`,
+  ];
 }
 
 app.use(
@@ -436,6 +440,74 @@ export function sendSafeError(
     });
 }
 
+export interface IntentParseErrorResponse {
+  statusCode: number;
+  code: string;
+  userMessage: string;
+  providerCategory?: AIProviderErrorCode;
+}
+
+export function classifyIntentParseError(error: unknown): IntentParseErrorResponse {
+  let category: AIProviderErrorCode | undefined;
+  if (error instanceof AIProviderError) {
+    category = error.code;
+  } else {
+    const message = error instanceof Error ? error.message : String(error);
+    const knownCategories: AIProviderErrorCode[] = [
+      "RATE_LIMITED",
+      "TIMEOUT",
+      "AUTHENTICATION_FAILED",
+      "MODEL_UNAVAILABLE",
+      "INVALID_REQUEST",
+      "INVALID_PROVIDER_OUTPUT",
+      "PROVIDER_UNAVAILABLE",
+    ];
+    category = knownCategories.find((candidate) => message.startsWith(`${candidate}:`));
+  }
+
+  if (category === "RATE_LIMITED") {
+    return {
+      statusCode: 429,
+      code: "AI_PROVIDER_RATE_LIMITED",
+      userMessage: "AI intent interpretation is temporarily unavailable. Please try again shortly.",
+      providerCategory: category,
+    };
+  }
+  if (category === "TIMEOUT" || category === "PROVIDER_UNAVAILABLE") {
+    return {
+      statusCode: 503,
+      code: "AI_PROVIDER_TEMPORARILY_UNAVAILABLE",
+      userMessage: "AI intent interpretation is temporarily unavailable. Please try again shortly.",
+      providerCategory: category,
+    };
+  }
+  if (category === "INVALID_PROVIDER_OUTPUT") {
+    return {
+      statusCode: 502,
+      code: "AI_PROVIDER_INVALID_RESPONSE",
+      userMessage: "AI intent interpretation returned an invalid response. Please try again.",
+      providerCategory: category,
+    };
+  }
+  if (
+    category === "AUTHENTICATION_FAILED" ||
+    category === "MODEL_UNAVAILABLE" ||
+    category === "INVALID_REQUEST"
+  ) {
+    return {
+      statusCode: 503,
+      code: "AI_PROVIDER_CONFIGURATION_ERROR",
+      userMessage: "AI intent interpretation is unavailable because the configured provider could not accept the request.",
+      providerCategory: category,
+    };
+  }
+  return {
+    statusCode: 500,
+    code: "PARSE_ERROR",
+    userMessage: "Failed to parse natural language intent.",
+  };
+}
+
 /* ================================================================
  * HEALTH
  * ================================================================ */
@@ -460,8 +532,10 @@ app.get(
 
     const llmConfigured =
       Boolean(
+        process.env.OPENAI_API_KEY ||
         process.env.GEMINI_API_KEY ||
-        process.env.GOOGLE_API_KEY
+        process.env.GOOGLE_API_KEY ||
+        process.env.LLM_API_KEY
       );
 
     const baseRpcConfigured =
@@ -1198,6 +1272,11 @@ const PatchIntentRequestSchema =
       allowMultiLeg:
         z
           .boolean()
+          .optional(),
+
+      source:
+        z
+          .string()
           .optional(),
     })
     .strict();
@@ -2236,11 +2315,20 @@ app.post(
 
       return res.json(dto);
     } catch (err: any) {
+      const failure = classifyIntentParseError(err);
+      if (failure.providerCategory) {
+        const providerStatus = IntentProviderFactory.getProviderStatusSummary();
+        console.error("AI intent parse provider failure", {
+          category: failure.providerCategory,
+          model: providerStatus.realModel,
+          requestId: (req as any).requestId,
+        });
+      }
       return sendSafeError(
         res,
-        500,
-        "PARSE_ERROR",
-        "Failed to parse natural language intent.",
+        failure.statusCode,
+        failure.code,
+        failure.userMessage,
         err
       );
     }
@@ -2383,6 +2471,8 @@ app.patch(
       const updates =
         parseValidation.data;
 
+      const fieldSource = (updates.source as any) || "USER_EXPLICIT";
+
       let materialChange =
         false;
 
@@ -2411,7 +2501,7 @@ app.patch(
             newAsset,
 
           source:
-            "USER_EXPLICIT",
+            fieldSource,
 
           confidence: 1,
 
@@ -2482,7 +2572,7 @@ app.patch(
             parsedAmount,
 
           source:
-            "USER_EXPLICIT",
+            fieldSource,
 
           confidence: 1,
 
@@ -2524,7 +2614,7 @@ app.patch(
               .targetMaxLossPercent,
 
           source:
-            "USER_EXPLICIT",
+            fieldSource,
 
           confidence: 1,
 
@@ -2572,7 +2662,7 @@ app.patch(
             parsedBudget,
 
           source:
-            "USER_EXPLICIT",
+            fieldSource,
 
           confidence: 1,
 
@@ -2616,7 +2706,7 @@ app.patch(
             ),
 
           source:
-            "USER_EXPLICIT",
+            fieldSource,
 
           confidence: 1,
 
@@ -2666,14 +2756,28 @@ app.patch(
           Date.now();
       }
 
-      await intentRepository.update(
-        intent
-      );
-
       const missing =
         computeMissingFields(
           intent
         );
+
+      const reviewMetadataIntent = intent as typeof intent & {
+        missingFields?: string[];
+        ambiguitiesFound?: [];
+        requiresClarification?: boolean;
+      };
+
+      reviewMetadataIntent.missingFields = missing;
+      if (missing.length === 0) {
+        reviewMetadataIntent.ambiguitiesFound = [];
+        reviewMetadataIntent.requiresClarification = false;
+      } else {
+        reviewMetadataIntent.requiresClarification = true;
+      }
+
+      await intentRepository.update(
+        intent
+      );
 
       const dto:
         IntentReviewDTO =
@@ -2879,6 +2983,30 @@ app.post(
       intent.updatedAtMs =
         nowMs;
 
+      const confirmedMetadataIntent = intent as typeof intent & {
+        missingFields?: string[];
+        ambiguitiesFound?: [];
+        requiresClarification?: boolean;
+      };
+
+      confirmedMetadataIntent.missingFields = [];
+      confirmedMetadataIntent.ambiguitiesFound = [];
+      confirmedMetadataIntent.requiresClarification = false;
+
+      if (
+        intent.targetMaxLossPercent?.source !== "USER_ACCEPTED_LIVE_CONTRACT" ||
+        !(intent as any).baseConfirmedGoal
+      ) {
+        (intent as any).baseConfirmedGoal = {
+          asset: intent.asset!.value,
+          exposureAmount: intent.exposureAmount!.value,
+          targetMaxLossPercent: intent.targetMaxLossPercent!.value,
+          maxPremiumUSDC: intent.maxPremiumUSDC!.value,
+          horizonTimestamp: intent.horizonTimestamp!.value,
+          allowMultiLeg: intent.allowMultiLeg?.value,
+        };
+      }
+
       await intentRepository.update(
         intent
       );
@@ -2922,6 +3050,71 @@ app.post(
         "Failed to confirm risk intent.",
         err
       );
+    }
+  }
+);
+
+/* ================================================================
+ * API: RESTORE BASE CONFIRMED INTENT
+ * ================================================================ */
+
+app.post(
+  "/api/v1/intents/:id/restore-base",
+  async (req, res) => {
+    try {
+      const intent = await intentRepository.findById(req.params.id);
+      if (!intent) {
+        return sendSafeError(res, 404, "INTENT_NOT_FOUND", `Intent with ID '${req.params.id}' not found.`);
+      }
+
+      const baseGoal = (intent as any).baseConfirmedGoal as BaseConfirmedGoal | undefined;
+      if (!baseGoal) {
+        return res.json({ restoredIntent: intent });
+      }
+
+      intent.targetMaxLossPercent = {
+        value: baseGoal.targetMaxLossPercent,
+        source: "USER_EXPLICIT",
+        confidence: 1,
+        requiresConfirmation: false,
+      };
+
+      intent.maxPremiumUSDC = {
+        value: baseGoal.maxPremiumUSDC,
+        source: "USER_EXPLICIT",
+        confidence: 1,
+        requiresConfirmation: false,
+      };
+
+      intent.horizonTimestamp = {
+        value: baseGoal.horizonTimestamp,
+        source: "USER_EXPLICIT",
+        confidence: 1,
+        requiresConfirmation: false,
+      };
+
+      intent.confirmedByUser = true;
+      intent.confirmedAtMs = Date.now();
+      intent.updatedAtMs = Date.now();
+      intent.version += 1;
+
+      const confirmedMetadataIntent = intent as typeof intent & {
+        missingFields?: string[];
+        ambiguitiesFound?: [];
+        requiresClarification?: boolean;
+      };
+      confirmedMetadataIntent.missingFields = [];
+      confirmedMetadataIntent.ambiguitiesFound = [];
+      confirmedMetadataIntent.requiresClarification = false;
+
+      await intentRepository.update(intent);
+
+      return res.json({
+        restoredIntent: intent,
+        message: "Protection goal restored to original user-confirmed values.",
+      });
+    } catch (err: any) {
+      return sendSafeError(res, 500, "RESTORE_BASE_FAILED", "Failed to restore base protection goal.", err);
     }
   }
 );
@@ -2974,6 +3167,9 @@ app.post(
         "true";
 
       let quotes;
+      let marketExplorer:
+        LiveMarketExplorer |
+        undefined;
 
       if (
         isServerDemoSnapshotMode
@@ -2984,9 +3180,19 @@ app.post(
         ];
       } else {
         try {
+          const rawOrders =
+            await marketService.fetchRawOrders();
+
           quotes =
             await marketService.fetchMarketQuotes(
-              confirmedIntent
+              confirmedIntent,
+              rawOrders
+            );
+
+          marketExplorer =
+            marketService.buildLiveMarketExplorer(
+              confirmedIntent,
+              rawOrders
             );
         } catch {
           const marketState =
@@ -3018,6 +3224,46 @@ app.post(
           confirmedIntent,
           quotes
         );
+
+      if (marketExplorer) {
+        const matchingOrderIds = new Set(
+          pipelineResult.rankedStrategies.flatMap((candidate) =>
+            candidate.legs.map((leg) => leg.quoteReference)
+          )
+        );
+
+        const matching = marketExplorer.allLive
+          .filter((order) => matchingOrderIds.has(order.orderId))
+          .map((order) => ({
+            ...order,
+            eligibilityStatus: "ELIGIBLE" as const,
+            rejectionReasons: [],
+          }));
+
+        const closest = marketExplorer.closest
+          .filter((order) => !matchingOrderIds.has(order.orderId))
+          .map((order) => ({
+            ...order,
+            eligibilityStatus: order.eligibilityStatus === "CLOSEST_INCOMPATIBLE" ? ("CLOSEST_INCOMPATIBLE" as const) : ("CLOSEST" as const),
+          }));
+
+        const statusById = new Map([
+          ...matching.map((order) => [order.orderId, "ELIGIBLE" as const] as const),
+          ...closest.map((order) => [order.orderId, order.eligibilityStatus] as const),
+        ]);
+
+        marketExplorer = {
+          ...marketExplorer,
+          matchingCount: matching.length,
+          closestCount: closest.length,
+          matching,
+          closest,
+          allLive: marketExplorer.allLive.map((order) => ({
+            ...order,
+            eligibilityStatus: statusById.get(order.orderId) ?? "OTHER",
+          })),
+        };
+      }
 
       const marketState =
         isServerDemoSnapshotMode
@@ -3165,6 +3411,8 @@ app.post(
                 "POLICY_INCOMPLETE_PENDING_PRICING",
             }
             : undefined,
+
+        marketExplorer,
 
         /*
          * Frontend must surface these rather than silently ignoring
@@ -4585,12 +4833,56 @@ app.get(
 );
 
 /* ================================================================
+ * STATIC ASSETS & SPA SERVING
+ * ================================================================ */
+
+const __serverFilename = fileURLToPath(import.meta.url);
+const __serverDirname = path.dirname(__serverFilename);
+
+const possibleDistPaths = [
+  path.resolve(__serverDirname, "../../dist/client"),
+  path.resolve(process.cwd(), "dist/client"),
+  path.resolve(__serverDirname, "../dist/client"),
+];
+
+const clientDistPath = possibleDistPaths.find((p) => fs.existsSync(p)) || possibleDistPaths[0];
+
+// 404 handler for unmatched /api routes
+app.use("/api", (_req, res) => {
+  return res.status(404).json({
+    error: "API endpoint not found.",
+    code: "NOT_FOUND",
+    errorCode: "NOT_FOUND",
+  });
+});
+
+if (fs.existsSync(clientDistPath)) {
+  app.use(express.static(clientDistPath));
+
+  app.use((req, res, next) => {
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      return next();
+    }
+    if (
+      req.path.startsWith("/api/") ||
+      req.path === "/healthz" ||
+      req.path === "/readyz"
+    ) {
+      return next();
+    }
+    const indexPath = path.join(clientDistPath, "index.html");
+    if (fs.existsSync(indexPath)) {
+      return res.sendFile(indexPath);
+    }
+    return next();
+  });
+}
+
+/* ================================================================
  * START SERVER
  * ================================================================ */
 
-const PORT =
-  process.env.PORT ||
-  3001;
+const PORT = Number(process.env.PORT || 3000);
 
 export const serverInstance =
   app.listen(

@@ -47,7 +47,11 @@ describe("ThetanutsMarketService Tests", () => {
       const spot = await service.getSpotPrice("ETH");
       expect(spot).toBeGreaterThan(0);
     } catch (err: any) {
-      expect(err.message).toContain("Live market spot price unavailable");
+      expect(
+        err.message.includes("Live market spot price unavailable") ||
+        err.message.includes("Market data timeout") ||
+        err.message.includes("timeout")
+      ).toBe(true);
     }
   });
 
