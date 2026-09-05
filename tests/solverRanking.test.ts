@@ -53,6 +53,10 @@ describe("Solver Deterministic Ranking & Rationale Tests", () => {
       premium: { amountBaseUnits: "9100000", decimals: 6, symbol: "USDC" },
       availableQuantity: { amountBaseUnits: "10000000000", decimals: 6, symbol: "USDC" },
       executableNow: true,
+      allStrikes: [{ amountBaseUnits: "226000000000", decimals: 8, symbol: "USD" }],
+      implementationAddress: "0x7355EB92dfb0503DB558a70c10843618932ab290", implementationName: "PUT", makerIsSeller: true,
+      orderValidityDeadlineMs: Date.now() + 3600_000,
+      eligibilityEvidence: { status: "ELIGIBLE_LONG_PUT", checkedAtMs: Date.now(), checks: [] },
     },
     {
       quoteId: "quote-strike-2350", // ~3.8% downside
@@ -65,6 +69,10 @@ describe("Solver Deterministic Ranking & Rationale Tests", () => {
       premium: { amountBaseUnits: "14000000", decimals: 6, symbol: "USDC" },
       availableQuantity: { amountBaseUnits: "10000000000", decimals: 6, symbol: "USDC" },
       executableNow: true,
+      allStrikes: [{ amountBaseUnits: "235000000000", decimals: 8, symbol: "USD" }],
+      implementationAddress: "0x7355EB92dfb0503DB558a70c10843618932ab290", implementationName: "PUT", makerIsSeller: true,
+      orderValidityDeadlineMs: Date.now() + 3600_000,
+      eligibilityEvidence: { status: "ELIGIBLE_LONG_PUT", checkedAtMs: Date.now(), checks: [] },
     },
   ];
 

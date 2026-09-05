@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { MOCK_OPTION_BOOK_QUOTES } from "../src/fixtures/mockQuotes";
 import { SimulationService } from "../src/services/SimulationService";
+import { ThetanutsMarketService } from "../src/services/ThetanutsMarketService";
 import { CandidateStrategy, TypedRiskIntent } from "../src/types";
 
 describe("Simulation & Intent Binding Semantics Tests", () => {
-  const simulationService = new SimulationService();
+  const marketService = new ThetanutsMarketService("");
+  marketService.getOrderIdentityDigest = () => "controlled-test-order-digest";
+  const simulationService = new SimulationService(marketService);
 
   const mockIntent: TypedRiskIntent = {
     intentId: "intent-test-sim",
@@ -57,7 +60,6 @@ describe("Simulation & Intent Binding Semantics Tests", () => {
       {
         ...MOCK_OPTION_BOOK_QUOTES[0],
         rawApiData: {
-          targetContract: "0x43063a482db1deb8ecf4177263b652882fa87431",
           timestampMs: Date.now(),
         },
       },
@@ -73,7 +75,9 @@ describe("Simulation & Intent Binding Semantics Tests", () => {
       protocolFee: { amountBaseUnits: "0", decimals: 6, symbol: "USDC" },
       referrerFee: { amountBaseUnits: "0", decimals: 6, symbol: "USDC" },
       totalExpectedCost: { amountBaseUnits: "2700000", decimals: 6, symbol: "USDC" },
-      feeStatus: "ZERO_VERIFIED",
+      feeStatus: "INCOMPLETE",
+      buyerSpendStatus: "VERIFIED",
+      buyerSpendVerificationMode: "TOTAL_BUYER_SPEND_PROVEN",
       collateralToken: "USDC",
       previewTimestampMs: Date.now(),
       previewSource: "THETANUTS_OPTIONBOOK_PREVIEW",
@@ -82,7 +86,7 @@ describe("Simulation & Intent Binding Semantics Tests", () => {
 
   it("should set targetContract from quote or SDK without fake placeholder addresses", async () => {
     const preview = await simulationService.generatePreview(mockIntent, validCandidate);
-    expect(preview.targetContract).toBe("0x43063a482db1deb8ecf4177263b652882fa87431");
+    expect(preview.targetContract).toBe(marketService.getOptionBookAddress());
     expect(preview.status).toBe("PREVIEW_ONLY");
   });
 

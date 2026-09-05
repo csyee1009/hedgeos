@@ -184,6 +184,11 @@ describe("Prompt 3 Repair & Audit Compliance Regression Suite", () => {
           premium: { amountBaseUnits: "9100000", decimals: 6, symbol: "USDC" },
           availableQuantity: { amountBaseUnits: "10000000000", decimals: 6, symbol: "USDC" },
           executableNow: true,
+          allStrikes: [{ amountBaseUnits: "226000000000", decimals: 8, symbol: "USD" }],
+          implementationAddress: "0x7355EB92dfb0503DB558a70c10843618932ab290",
+          implementationName: "PUT", makerIsSeller: true,
+          orderValidityDeadlineMs: Date.now() + 3600_000,
+          eligibilityEvidence: { status: "ELIGIBLE_LONG_PUT", checkedAtMs: Date.now(), checks: [] },
         },
       ],
       status: "TECHNICALLY_FEASIBLE",
@@ -198,10 +203,11 @@ describe("Prompt 3 Repair & Audit Compliance Regression Suite", () => {
         protocolFee: { amountBaseUnits: "0", decimals: 6, symbol: "USDC" },
         referrerFee: { amountBaseUnits: "0", decimals: 6, symbol: "USDC" },
         totalExpectedCost: { amountBaseUnits: "9100000", decimals: 6, symbol: "USDC" },
-        feeStatus: "ZERO_VERIFIED",
+        feeStatus: "VERIFIED", buyerSpendStatus: "VERIFIED",
         collateralToken: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
         previewTimestampMs: Date.now(),
         previewSource: "THETANUTS_OPTIONBOOK_PREVIEW",
+        rawPreviewData: { numContracts: "2000000" },
       },
       payoffSummary: {
         status: "CALCULATED",
@@ -217,6 +223,7 @@ describe("Prompt 3 Repair & Audit Compliance Regression Suite", () => {
         scenarios: [],
         details: "Test details",
         calculationTimestampMs: Date.now(),
+        exact: { exposureValuePrice8: "487732000000", protectedFloorValuePrice8: "451090000000", maxLossValuePrice8: "36642000000", totalCostUSDC6: "9100000", quantity18: "2000000000000000000", strikePrice8: "226000000000", spotPrice8: "243866000000" },
       },
     };
 

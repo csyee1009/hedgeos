@@ -127,7 +127,7 @@ TypedRiskIntent (sha256 digest)
    │      │                    │
    │      │                    └─► ExternalHumanAuthorizationHandoff (sha256 requestDigest)
    │      │                           │
-   └──────┴───────────────────────────┴─► Immutable AuditReceipt (sha256 receiptDigest)
+   └──────┴───────────────────────────┴─► Tamper-evident AuditReceipt (sha256 receiptDigest)
 ```
 
 ## 7. Market Evidence Flow
@@ -138,7 +138,7 @@ Market quotes are fetched live from Thetanuts OptionBook contracts on Base Mainn
 
 All domain records are persisted to SQLite using `node:sqlite`:
 - `intents`: Stores drafts and versioned confirmed intents.
-- `audit_receipts`: Stores immutable receipt records and digests.
+- `audit_receipts`: Stores receipt records and digests that are revalidated on read.
 - `authorization_handoffs`: Stores external human authorization handoffs and statuses.
 
 ## 9. Failure Modes

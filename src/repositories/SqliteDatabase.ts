@@ -65,6 +65,31 @@ export class SqliteDatabase {
         created_at_ms INTEGER NOT NULL,
         updated_at_ms INTEGER NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS discovery_snapshots (
+        discovery_id TEXT PRIMARY KEY,
+        discovery_digest TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at_ms INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS execution_preparations (
+        preparation_id TEXT PRIMARY KEY,
+        preparation_digest TEXT NOT NULL,
+        intent_id TEXT NOT NULL,
+        intent_version INTEGER NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at_ms INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS execution_verifications (
+        verification_id TEXT PRIMARY KEY,
+        verification_digest TEXT NOT NULL,
+        preparation_id TEXT NOT NULL,
+        transaction_hash TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at_ms INTEGER NOT NULL
+      );
     `);
   }
 

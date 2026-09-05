@@ -8,7 +8,7 @@ import {
   TypedRiskIntent,
 } from "../types";
 import { ActionProposalBuilder } from "./ActionProposalBuilder";
-import { ExposurePayoffEngine } from "./ExposurePayoffEngine";
+import { calculateExactLongPutPayoff, scaleExact } from "./ExactFinancialMath";
 import { FinancialConstitutionEngine } from "./FinancialConstitutionEngine";
 import { HumanReviewService } from "./HumanReviewService";
 import { OptionSizingAdapter } from "./OptionSizingAdapter";
@@ -86,16 +86,6 @@ export class ProtectionSolverEngine {
     } catch {
       spotPriceUSD = 0;
     }
-
-    const exposureQuantityNum =
-      Number(
-        BigInt(
-          intent.exposureAmount.value
-            .amountBaseUnits
-        )
-      ) /
-      10 **
-      intent.exposureAmount.value.decimals;
 
     const putQuotes = quotes.filter(
       (quote) => {
@@ -252,27 +242,6 @@ export class ProtectionSolverEngine {
           )
         );
 
-      const totalCostUSD =
-        preview.previewStatus ===
-          "PREVIEW_AVAILABLE"
-          ? Number(
-            BigInt(
-              preview.totalExpectedCost
-                .amountBaseUnits
-            )
-          ) /
-          10 **
-          preview.totalExpectedCost
-            .decimals
-          : Number(
-            BigInt(
-              quote.premium
-                .amountBaseUnits
-            )
-          ) /
-          10 **
-          quote.premium.decimals;
-
       let payoffSummary: any =
         undefined;
 
@@ -291,26 +260,25 @@ export class ProtectionSolverEngine {
         preview.previewStatus ===
         "PREVIEW_AVAILABLE"
       ) {
-        payoffSummary =
-          ExposurePayoffEngine.calculate({
-            spotQuantity:
-              exposureQuantityNum,
-
-            optionQuantity:
-              exposureQuantityNum,
-
-            strikePriceUSD:
-              strikeUSD,
-
-            spotReferencePriceUSD:
-              spotPriceUSD,
-
-            totalProtectionCostUSD:
-              totalCostUSD,
-
-            assetSymbol:
-              targetAsset,
+        try {
+          const quantity18 = scaleExact(
+            BigInt(leg.resolvedOptionQuantity!.amountBaseUnits),
+            leg.resolvedOptionQuantity!.decimals,
+            18
+          );
+          payoffSummary = calculateExactLongPutPayoff({
+            quantity18,
+            strikePrice8: scaleExact(BigInt(quote.strikePrice.amountBaseUnits), quote.strikePrice.decimals, 8),
+            spotPrice8: BigInt(spotPriceUSD.toFixed(8).replace(".", "")),
+            totalCostUSDC6: scaleExact(BigInt(preview.totalExpectedCost.amountBaseUnits), preview.totalExpectedCost.decimals, 6),
+            assetSymbol: targetAsset,
           });
+        } catch {
+          payoffSummary = {
+            status: "NOT_AVAILABLE",
+            details: "Exact modeled-at-expiry arithmetic could not be established.",
+          };
+        }
       }
 
       const candidate: CandidateStrategy =
@@ -409,6 +377,15 @@ export class ProtectionSolverEngine {
           candidate
         );
 
+        continue;
+      }
+
+      if (
+        quote?.executableNow !== true
+      ) {
+        candidate.status = "TECHNICALLY_REJECTED";
+        candidate.rejectionReasons.push("Order is not executable now or its validity evidence is missing");
+        rejectedCandidates.push(candidate);
         continue;
       }
 

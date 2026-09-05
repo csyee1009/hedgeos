@@ -278,7 +278,9 @@ describe("Prompt 4 Repair: RFQ Honesty + Policy Semantics Suite", () => {
         protocolFee: { amountBaseUnits: "0", decimals: 6, symbol: "USDC" },
         referrerFee: { amountBaseUnits: "0", decimals: 6, symbol: "USDC" },
         totalExpectedCost: { amountBaseUnits: "12000000", decimals: 6, symbol: "USDC" }, // 12 USDC <= 20 USDC budget
-        feeStatus: "ZERO_VERIFIED",
+        feeStatus: "INCOMPLETE",
+        buyerSpendStatus: "VERIFIED",
+        buyerSpendVerificationMode: "TOTAL_BUYER_SPEND_PROVEN",
         collateralToken: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
         previewTimestampMs: Date.now(),
         previewSource: "THETANUTS_MM_PRICING",

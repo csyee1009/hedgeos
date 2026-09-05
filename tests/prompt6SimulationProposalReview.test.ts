@@ -2,9 +2,13 @@ import { describe, expect, it } from "vitest";
 import { ActionProposalBuilder } from "../src/services/ActionProposalBuilder";
 import { HumanReviewService } from "../src/services/HumanReviewService";
 import { ThetanutsSimulationService } from "../src/services/ThetanutsSimulationService";
+import { ThetanutsMarketService } from "../src/services/ThetanutsMarketService";
 import { ActionProposal, CandidateStrategy, MarketQuote, TokenAmount, TypedRiskIntent } from "../src/types";
 
 describe("Prompt 6 Repair: Truthful Simulation, Binding, & Review Integrity", () => {
+  const marketService = new ThetanutsMarketService("");
+  marketService.getOrderIdentityDigest = () => "controlled-test-order-digest";
+
   const mockIntent: TypedRiskIntent = {
     intentId: "intent-p6-001",
     version: 1,
@@ -58,8 +62,20 @@ describe("Prompt 6 Repair: Truthful Simulation, Binding, & Review Integrity", ()
     makerAddress: "0x1111222233334444555566667777888899990000",
     orderIndex: 3,
     rawApiData: {
-      targetContract: "0x43063a482db1deb8ecf4177263b652882fa87431",
       timestampMs: freshTimestamp,
+    },
+    allStrikes: [{ amountBaseUnits: "230000000000", decimals: 8, symbol: "USD" }],
+    implementationAddress: "0x7355EB92dfb0503DB558a70c10843618932ab290",
+    implementationName: "PUT",
+    makerIsSeller: true,
+    rawOrderIsLong: true,
+    normalizedOptionType: "PUT",
+    rawOptionType: 1,
+    orderValidityDeadlineMs: Date.now() + 3_600_000,
+    eligibilityEvidence: {
+      status: "ELIGIBLE_LONG_PUT",
+      checkedAtMs: Date.now(),
+      checks: [],
     },
   };
 
@@ -91,7 +107,9 @@ describe("Prompt 6 Repair: Truthful Simulation, Binding, & Review Integrity", ()
       protocolFee: { amountBaseUnits: "0", decimals: 6, symbol: "USDC" },
       referrerFee: { amountBaseUnits: "0", decimals: 6, symbol: "USDC" },
       totalExpectedCost: { amountBaseUnits: "9000000", decimals: 6, symbol: "USDC" },
-      feeStatus: "ZERO_VERIFIED",
+      feeStatus: "INCOMPLETE",
+      buyerSpendStatus: "VERIFIED",
+      buyerSpendVerificationMode: "TOTAL_BUYER_SPEND_PROVEN",
       collateralToken: "USDC",
       previewTimestampMs: freshTimestamp,
       previewSource: "THETANUTS_OPTIONBOOK_PREVIEW",
@@ -105,13 +123,13 @@ describe("Prompt 6 Repair: Truthful Simulation, Binding, & Review Integrity", ()
   const simService = new ThetanutsSimulationService();
 
   it("Requirement 1: OptionBook proposal bindingStatus is PREVIEW_BOUND (never fake EXACT_TRANSACTION_BOUND)", () => {
-    const proposal = ActionProposalBuilder.buildOptionBookProposal(mockIntent, mockCandidate);
+    const proposal = ActionProposalBuilder.buildOptionBookProposal(mockIntent, mockCandidate, marketService);
     expect(proposal.bindingStatus).toBe("PREVIEW_BOUND");
     expect(proposal.bindingStatus).not.toBe("EXACT_TRANSACTION_BOUND");
   });
 
   it("Requirement 2: Deterministic verification reports DETERMINISTIC_VERIFIED, not PROVIDER_SIMULATED without provider call", async () => {
-    const proposal = ActionProposalBuilder.buildOptionBookProposal(mockIntent, mockCandidate);
+    const proposal = ActionProposalBuilder.buildOptionBookProposal(mockIntent, mockCandidate, marketService);
     // simService instantiated without marketService -> pure deterministic checks
     const simResult = await simService.simulateProposal(proposal, mockIntent, mockCandidate, 2400);
 
@@ -121,7 +139,7 @@ describe("Prompt 6 Repair: Truthful Simulation, Binding, & Review Integrity", ()
   });
 
   it("Requirement 4: Spot price <= 0 fails protection re-evaluation (No fake $2400 spot fallback)", async () => {
-    const proposal = ActionProposalBuilder.buildOptionBookProposal(mockIntent, mockCandidate);
+    const proposal = ActionProposalBuilder.buildOptionBookProposal(mockIntent, mockCandidate, marketService);
     // Spot price is 0 (unavailable)
     const simResult = await simService.simulateProposal(proposal, mockIntent, mockCandidate, 0);
 
@@ -132,7 +150,7 @@ describe("Prompt 6 Repair: Truthful Simulation, Binding, & Review Integrity", ()
   });
 
   it("Requirement 5: Mutated proposal fields cause digest mismatch rejection", async () => {
-    const proposal = ActionProposalBuilder.buildOptionBookProposal(mockIntent, mockCandidate);
+    const proposal = ActionProposalBuilder.buildOptionBookProposal(mockIntent, mockCandidate, marketService);
 
     // Mutate strike
     const mutatedProposal: ActionProposal = {
@@ -146,7 +164,7 @@ describe("Prompt 6 Repair: Truthful Simulation, Binding, & Review Integrity", ()
   });
 
   it("Requirement 6: Mutated quantity, expiry, or cost causes digest mismatch", async () => {
-    const proposal = ActionProposalBuilder.buildOptionBookProposal(mockIntent, mockCandidate);
+    const proposal = ActionProposalBuilder.buildOptionBookProposal(mockIntent, mockCandidate, marketService);
 
     const mutatedQty: ActionProposal = {
       ...proposal,
@@ -175,8 +193,8 @@ describe("Prompt 6 Repair: Truthful Simulation, Binding, & Review Integrity", ()
       ],
     };
 
-    expect(() => ActionProposalBuilder.buildOptionBookProposal(mockIntent, unsizedCandidate)).toThrow(
-      /Option sizing is unverified/
+    expect(() => ActionProposalBuilder.buildOptionBookProposal(mockIntent, unsizedCandidate, marketService)).toThrow(
+      /exact resolved option quantity is required/
     );
   });
 
@@ -186,13 +204,13 @@ describe("Prompt 6 Repair: Truthful Simulation, Binding, & Review Integrity", ()
       quotes: [{ ...mockQuote, asset: "" }],
     };
 
-    expect(() => ActionProposalBuilder.buildOptionBookProposal(mockIntent, missingAssetCandidate)).toThrow(
-      /MarketQuote is missing explicit asset/
+    expect(() => ActionProposalBuilder.buildOptionBookProposal(mockIntent, missingAssetCandidate, marketService)).toThrow(
+      /explicitly identify a PUT and an underlying asset/
     );
   });
 
   it("Requirement 11 & 19: Missing evidence timestamp is UNAVAILABLE, stale (>60s) is STALE", async () => {
-    const proposal = ActionProposalBuilder.buildOptionBookProposal(mockIntent, mockCandidate);
+    const proposal = ActionProposalBuilder.buildOptionBookProposal(mockIntent, mockCandidate, marketService);
 
     // Missing preview timestamp
     const noTimestampCand: CandidateStrategy = {
@@ -214,7 +232,7 @@ describe("Prompt 6 Repair: Truthful Simulation, Binding, & Review Integrity", ()
   });
 
   it("Requirement 15: HumanReviewService rejects fake 7.5% default and sets NOT_PRESENTED if downside is missing", () => {
-    const proposal = ActionProposalBuilder.buildOptionBookProposal(mockIntent, mockCandidate);
+    const proposal = ActionProposalBuilder.buildOptionBookProposal(mockIntent, mockCandidate, marketService);
     const simResult: any = {
       proposalId: proposal.proposalId,
       proposalDigest: proposal.proposalDigest,
@@ -234,7 +252,7 @@ describe("Prompt 6 Repair: Truthful Simulation, Binding, & Review Integrity", ()
   });
 
   it("Requirement 16: HumanReview becomes READY_FOR_REVIEW only when all bindings, freshness, and checks pass", () => {
-    const proposal = ActionProposalBuilder.buildOptionBookProposal(mockIntent, mockCandidate);
+    const proposal = ActionProposalBuilder.buildOptionBookProposal(mockIntent, mockCandidate, marketService);
     const simResult: any = {
       proposalId: proposal.proposalId,
       proposalDigest: proposal.proposalDigest,
@@ -278,7 +296,7 @@ describe("Prompt 6 Repair: Truthful Simulation, Binding, & Review Integrity", ()
       validationErrors: [],
     };
 
-    const rfqProposal = ActionProposalBuilder.buildRFQProposal(mockIntent, rfqSpec);
+    const rfqProposal = ActionProposalBuilder.buildRFQProposal(mockIntent, rfqSpec, marketService);
 
     expect(rfqProposal.expectedTotalCost).toBeUndefined();
     expect(rfqProposal.expectedPremium).toBeUndefined();
@@ -288,7 +306,7 @@ describe("Prompt 6 Repair: Truthful Simulation, Binding, & Review Integrity", ()
   });
 
   it("Requirement 24: REVIEWED state strictly preserves NOT_AUTHORIZED and never grants execution authority", () => {
-    const proposal = ActionProposalBuilder.buildOptionBookProposal(mockIntent, mockCandidate);
+    const proposal = ActionProposalBuilder.buildOptionBookProposal(mockIntent, mockCandidate, marketService);
     const simResult: any = {
       proposalId: proposal.proposalId,
       proposalDigest: proposal.proposalDigest,

@@ -23,6 +23,8 @@ import { ConfirmedIntentView } from "./components/ConfirmedIntentView";
 import { IntentReview } from "./components/IntentReview";
 import { OutcomeInput } from "./components/OutcomeInput";
 import { PortfolioOnboarding } from "./components/PortfolioOnboarding";
+import { SimpleDiscovery } from "./components/SimpleDiscovery";
+import { ExternalExecutionPanel } from "./components/ExternalExecutionPanel";
 
 export type UIState =
   | "EMPTY"
@@ -34,7 +36,7 @@ export type UIState =
   | "SOLVED"
   | "ERROR";
 
-export type EntryMode = "ONBOARDING" | "ADDRESS" | "MANUAL";
+export type EntryMode = "ONBOARDING" | "SIMPLE" | "ADVANCED" | "ADVANCED_INPUT";
 
 const normalizeAmbiguities = (
   value: unknown
@@ -646,6 +648,10 @@ export default function App() {
       ? "Live Base Mainnet"
       : marketState?.status === "CONNECTING"
         ? "Connecting"
+        : marketState?.status === "VERIFIED_EMPTY_ORDERBOOK"
+          ? "Live · empty orderbook"
+          : marketState?.status === "STALE"
+            ? "Stale market evidence"
         : marketState?.status === "NOT_CONFIGURED"
           ? "Market not connected"
           : "Live market unavailable";
@@ -816,12 +822,37 @@ export default function App() {
               "ERROR") && (
               <>
                 {entryMode === "ONBOARDING" && uiState === "EMPTY" ? (
+                  <section className="entry-choice card">
+                    <p className="eyebrow">HEDGEOS</p>
+                    <h1>What would you like to do?</h1>
+                    <div className="entry-choice-grid">
+                      <button className="entry-choice-button" type="button" onClick={() => setEntryMode("SIMPLE")}>
+                        <strong>Help me choose protection</strong>
+                        <span>Describe your holding and concern. Compare feasible outcomes observed now.</span>
+                      </button>
+                      <button className="entry-choice-button" type="button" onClick={() => setEntryMode("ADVANCED")}>
+                        <strong>I already know my limits</strong>
+                        <span>Enter exact modeled downside, budget, exposure, and horizon constraints.</span>
+                      </button>
+                    </div>
+                  </section>
+                ) : entryMode === "SIMPLE" ? (
+                  <SimpleDiscovery
+                    onBack={() => setEntryMode("ONBOARDING")}
+                    onCompiled={(compiled) => {
+                      setIntent(compiled);
+                      setMissingFields([]);
+                      setAmbiguities([]);
+                      setUiState("READY_FOR_CONFIRMATION");
+                    }}
+                  />
+                ) : entryMode === "ADVANCED" ? (
                   <PortfolioOnboarding
-                    onSelectManual={() => setEntryMode("MANUAL")}
+                    onSelectManual={() => setEntryMode("ADVANCED_INPUT")}
                     onSelectPrefilledAmount={(prompt, notice) => {
                       setPromptText(prompt);
                       setSourceNotice(notice);
-                      setEntryMode("MANUAL");
+                      setEntryMode("ADVANCED_INPUT");
                     }}
                   />
                 ) : (
@@ -832,7 +863,7 @@ export default function App() {
                     isParsing={uiState === "PARSING"}
                     sourceNotice={sourceNotice}
                     onResetOnboarding={() => {
-                      setEntryMode("ONBOARDING");
+                      setEntryMode("ADVANCED");
                       setSourceNotice(undefined);
                     }}
                   />
@@ -891,6 +922,7 @@ export default function App() {
             intent.confirmedByUser &&
             uiState ===
             "SOLVED" && (
+              <>
               <CandidateList
                 intent={
                   intent as TypedRiskIntent
@@ -944,6 +976,10 @@ export default function App() {
                   handleSolveProtection
                 }
               />
+              {candidates[0] && candidates[0].status === "TECHNICALLY_FEASIBLE" && (
+                <ExternalExecutionPanel intent={intent as TypedRiskIntent} candidate={candidates[0]} />
+              )}
+              </>
             )}
         </div>
       </main>
@@ -957,7 +993,7 @@ export default function App() {
           </span>
 
           <span>
-            Read-only protection preview • No transaction submitted
+            Non-custodial • Externally authorized execution • On-chain verified only when evidence supports it
           </span>
         </div>
       </footer>

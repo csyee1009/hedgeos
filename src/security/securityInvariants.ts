@@ -52,7 +52,7 @@ export const SECURITY_INVARIANTS: Record<string, SecurityInvariantDefinition> = 
     name: "Unknown Prices/Fees Never Become Zero",
     category: "FINANCIAL_SAFETY",
     description: "If option price, fee, or spot price is unknown or unavailable, it is never treated as zero.",
-    enforcementMechanism: "FeeStatus must be explicitly ZERO_VERIFIED; unpriced RFQ quotes are kept unpriced; spot <= 0 fails evaluation.",
+    enforcementMechanism: "Verified total buyer spend is tracked separately from fee breakdown; unknown fees remain INCOMPLETE or NOT_AVAILABLE, unpriced RFQ quotes stay unpriced, and spot <= 0 fails evaluation.",
     failClosedBehavior: "Financial checks enter NOT_EVALUATED and overall status is INCOMPLETE/FAIL.",
   },
   "SEC-006": {

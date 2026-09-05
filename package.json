@@ -6,6 +6,7 @@
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
+    "build": "npm run build:client",
     "build:client": "vite build",
     "start:server": "tsx src/server/index.ts",
     "dev:client": "vite",

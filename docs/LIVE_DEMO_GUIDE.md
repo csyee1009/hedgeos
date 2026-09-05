@@ -39,7 +39,7 @@ Open `http://localhost:5173` in your browser.
 
 ### Step 4: Review Typed Risk Intent
 - **What to point out:**
-  - Gemini 3.7 Flash converted the prompt into a structured `TypedRiskIntent` draft.
+  - The configured Gemini model converted the prompt into a structured `TypedRiskIntent` draft; its actual name is shown by the runtime status.
   - Every parameter shows its provenance badge (`USER_EXPLICIT`).
   - Notice that `confirmedByUser` is currently `false`—the AI has **zero authority** to confirm or execute.
   - You can edit any parameter (e.g. adjust budget or loss target) if needed.

@@ -8,6 +8,9 @@ import { ThetanutsSimulationService } from "../src/services/ThetanutsSimulationS
 import { CandidateStrategy, MarketQuote, TypedRiskIntent } from "../src/types";
 
 describe("Prompt 8: Market Failure Matrix & Fault Resilience", () => {
+  const proposalMarketService = new ThetanutsMarketService("");
+  proposalMarketService.getOrderIdentityDigest = () => "controlled-test-order-digest";
+
   const confirmedIntent: TypedRiskIntent = {
     intentId: "intent-fail-001",
     version: 1,
@@ -144,6 +147,21 @@ describe("Prompt 8: Market Failure Matrix & Fault Resilience", () => {
       premium: { amountBaseUnits: "9000000", decimals: 6, symbol: "USDC" },
       availableQuantity: { amountBaseUnits: "5000000000000000000", decimals: 18, symbol: "ETH" },
       executableNow: true,
+      makerAddress: "0x1234567890abcdef1234567890abcdef12345678",
+      orderIndex: 0,
+      allStrikes: [{ amountBaseUnits: "230000000000", decimals: 8, symbol: "USD" }],
+      implementationAddress: "0x7355EB92dfb0503DB558a70c10843618932ab290",
+      implementationName: "PUT",
+      makerIsSeller: true,
+      rawOrderIsLong: true,
+      normalizedOptionType: "PUT",
+      rawOptionType: 1,
+      orderValidityDeadlineMs: Date.now() + 3_600_000,
+      eligibilityEvidence: {
+        status: "ELIGIBLE_LONG_PUT",
+        checkedAtMs: Date.now(),
+        checks: [],
+      },
     };
 
     const candidate: CandidateStrategy = {
@@ -174,14 +192,20 @@ describe("Prompt 8: Market Failure Matrix & Fault Resilience", () => {
         protocolFee: { amountBaseUnits: "0", decimals: 6, symbol: "USDC" },
         referrerFee: { amountBaseUnits: "0", decimals: 6, symbol: "USDC" },
         totalExpectedCost: { amountBaseUnits: "9000000", decimals: 6, symbol: "USDC" },
-        feeStatus: "ZERO_VERIFIED",
+        feeStatus: "INCOMPLETE",
+        buyerSpendStatus: "VERIFIED",
+        buyerSpendVerificationMode: "TOTAL_BUYER_SPEND_PROVEN",
         collateralToken: "USDC",
         previewTimestampMs: Date.now(),
         previewSource: "THETANUTS_OPTIONBOOK_PREVIEW",
       },
     };
 
-    const proposal = ActionProposalBuilder.buildOptionBookProposal(confirmedIntent, candidate);
+    const proposal = ActionProposalBuilder.buildOptionBookProposal(
+      confirmedIntent,
+      candidate,
+      proposalMarketService
+    );
     const simResult = await simService.simulateProposal(proposal, confirmedIntent, candidate, 0); // 0 spot price
 
     expect(simResult.status).toBe("FAILED");

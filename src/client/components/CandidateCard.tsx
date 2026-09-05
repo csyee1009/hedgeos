@@ -62,10 +62,6 @@ const statusLabel = (status?: string): string => {
     return "Read-only preview available";
   }
 
-  if (status === "ZERO_VERIFIED") {
-    return "Verified zero fee";
-  }
-
   if (status === "NOT_EVALUATED") {
     return "Not evaluated";
   }

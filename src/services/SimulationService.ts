@@ -1,15 +1,24 @@
 import { SimulationProvider } from "../providers/interfaces/SimulationProvider";
 import { CandidateStrategy, MarketEvidenceStatus, SimulationResult, TypedRiskIntent } from "../types";
 import { ActionProposalBuilder } from "./ActionProposalBuilder";
+import { ThetanutsMarketService } from "./ThetanutsMarketService";
 import { PRODUCT_MARKET_FRESHNESS_THRESHOLD_MS } from "./ThetanutsSimulationService";
 
 export class SimulationService implements SimulationProvider {
+  constructor(
+    private readonly marketService = new ThetanutsMarketService()
+  ) { }
+
   public async generatePreview(
     intent: TypedRiskIntent,
     candidate: CandidateStrategy
   ): Promise<SimulationResult> {
     const quote = candidate.quotes[0];
-    const proposal = ActionProposalBuilder.buildOptionBookProposal(intent, candidate);
+    const proposal = ActionProposalBuilder.buildOptionBookProposal(
+      intent,
+      candidate,
+      this.marketService
+    );
     const nowMs = Date.now();
 
     const previewTimestamp = candidate.preview?.previewTimestampMs || 0;

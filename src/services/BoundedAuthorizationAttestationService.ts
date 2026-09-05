@@ -241,10 +241,8 @@ export class BoundedAuthorizationAttestationService {
 
     const costAvailable =
       Boolean(expectedTotalCost) &&
-      (simulation.feeStatus === "AVAILABLE" ||
-        simulation.feeStatus === "ZERO_VERIFIED" ||
-        proposal.feeStatus === "AVAILABLE" ||
-        proposal.feeStatus === "ZERO_VERIFIED");
+      (simulation.buyerSpendStatus === "VERIFIED" ||
+        proposal.buyerSpendStatus === "VERIFIED");
 
     addCheck(
       "VERIFIED_TOTAL_COST",

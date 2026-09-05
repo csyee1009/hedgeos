@@ -78,7 +78,9 @@ describe("FinancialConstitutionEngine Prompt 3 Invariants Tests", () => {
       protocolFee: { amountBaseUnits: "0", decimals: 6, symbol: "USDC" },
       referrerFee: { amountBaseUnits: "0", decimals: 6, symbol: "USDC" },
       totalExpectedCost: { amountBaseUnits: "9100000", decimals: 6, symbol: "USDC" }, // 9.10 USDC <= 10.00 USDC
-      feeStatus: "ZERO_VERIFIED",
+      feeStatus: "INCOMPLETE",
+      buyerSpendStatus: "VERIFIED",
+      buyerSpendVerificationMode: "TOTAL_BUYER_SPEND_PROVEN",
       collateralToken: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
       previewTimestampMs: Date.now(),
       previewSource: "THETANUTS_OPTIONBOOK_PREVIEW",

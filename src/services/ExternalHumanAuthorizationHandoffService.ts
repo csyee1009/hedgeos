@@ -25,6 +25,7 @@ export class ExternalHumanAuthorizationHandoffService {
       (attestation.status === "SCOPE_ATTESTED_PREVIEW_ONLY" ||
         attestation.status === "EXTERNAL_AUTHORIZATION_ELIGIBLE") &&
       (commitment.status === "PROPOSAL_BOUND" ||
+        commitment.status === "EXACT_TRANSACTION_BOUND" ||
         commitment.status === "EXTERNAL_PAYLOAD_BOUND") &&
       commitment.expiresAtMs > createdAtMs &&
       commitment.intentId === intent.intentId &&
@@ -58,6 +59,9 @@ export class ExternalHumanAuthorizationHandoffService {
       protocol: commitment.protocol,
       maximumSpendUSDC: intent.maxPremiumUSDC.value,
       expectedExpiryMs: commitment.expectedExpiryMs,
+      exactPreparationId: commitment.exactPreparationId,
+      calldataHash: commitment.calldataHash,
+      expectedBeneficiary: commitment.expectedBeneficiary?.toLowerCase(),
       createdAtMs,
       expiresAtMs,
     });
@@ -78,6 +82,9 @@ export class ExternalHumanAuthorizationHandoffService {
       protocol: "THETANUTS",
       maximumSpendUSDC: intent.maxPremiumUSDC.value,
       expectedExpiryMs: commitment.expectedExpiryMs,
+      exactPreparationId: commitment.exactPreparationId,
+      calldataHash: commitment.calldataHash,
+      expectedBeneficiary: commitment.expectedBeneficiary,
       createdAtMs,
       expiresAtMs,
       status,

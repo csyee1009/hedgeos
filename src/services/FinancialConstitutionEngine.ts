@@ -8,6 +8,7 @@ import {
   TokenAmount,
   TypedRiskIntent,
 } from "../types";
+import { ratioLessThanOrEqualPercent } from "./ExactFinancialMath";
 
 const normalizeAsset = (asset: string): string => {
   const normalized = asset.toUpperCase();
@@ -31,8 +32,8 @@ const getVerifiedCost = (
     "PREVIEW_AVAILABLE"
   ) {
     if (
-      candidate.preview.feeStatus === "AVAILABLE" ||
-      candidate.preview.feeStatus === "ZERO_VERIFIED"
+      candidate.preview.buyerSpendStatus === "VERIFIED" ||
+      candidate.preview.feeStatus === "VERIFIED"
     ) {
       return candidate.preview.totalExpectedCost;
     }
@@ -413,15 +414,17 @@ export class FinancialConstitutionEngine
       "effectiveDownsidePercent" in
       candidate.payoffSummary
     ) {
-      const effectiveDownside =
-        candidate.payoffSummary
-          .effectiveDownsidePercent;
-
       const targetLoss =
         intent.targetMaxLossPercent.value;
-
-      const targetMet =
-        effectiveDownside <= targetLoss;
+      const exact = candidate.payoffSummary.exact;
+      const effectiveDownside = candidate.payoffSummary.effectiveDownsidePercent;
+      const targetMet = exact
+        ? ratioLessThanOrEqualPercent(
+          BigInt(exact.maxLossValuePrice8),
+          BigInt(exact.exposureValuePrice8),
+          targetLoss
+        )
+        : false;
 
       checks.push({
         ruleId: "POL-009",
@@ -431,8 +434,10 @@ export class FinancialConstitutionEngine
           ? "PASS"
           : "FAIL",
         details: targetMet
-          ? `Modeled downside ${effectiveDownside}% is within confirmed target ${targetLoss}%.`
-          : `Modeled downside ${effectiveDownside}% exceeds confirmed target ${targetLoss}%.`,
+          ? `Exact modeled-at-expiry downside ratio is within confirmed target ${targetLoss}% (display ${effectiveDownside}%).`
+          : exact
+            ? `Exact modeled-at-expiry downside ratio exceeds confirmed target ${targetLoss}% (display ${effectiveDownside}%).`
+            : "Exact modeled-at-expiry downside evidence is unavailable; display rounding cannot authorize a pass.",
       });
     } else {
       checks.push({
@@ -446,6 +451,52 @@ export class FinancialConstitutionEngine
             : "Verified payoff evidence is unavailable, so the confirmed downside target cannot be evaluated.",
       });
     }
+
+    const quote = candidate.quotes[0];
+    const isRfqSpecification = stage === "RFQ_SPECIFICATION";
+    checks.push({
+      ruleId: "POL-010",
+      description: "Order direction makes the user/taker the option buyer",
+      status: isRfqSpecification ? "NOT_EVALUATED" : quote?.makerIsSeller === true ? "PASS" : "FAIL",
+      details: quote?.makerIsSeller === true
+        ? "Signed-order evidence has isLong=true: maker sells and taker buys."
+        : "Protective LONG_PUT direction was not proven from signed-order evidence.",
+    });
+    const structureEligible = quote?.allStrikes?.length === 1
+      && quote.implementationName === "PUT"
+      && quote.eligibilityEvidence?.status === "ELIGIBLE_LONG_PUT";
+    checks.push({
+      ruleId: "POL-011",
+      description: "Order is an unambiguous single-leg vanilla put",
+      status: isRfqSpecification ? "NOT_EVALUATED" : structureEligible ? "PASS" : "FAIL",
+      details: structureEligible
+        ? "Full strike array and SDK implementation metadata prove a one-strike vanilla PUT."
+        : "Single-leg vanilla PUT structure is not fully evidenced.",
+    });
+    const nowMs = Date.now();
+    const validityPass = quote?.executableNow === true
+      && Boolean(quote.orderValidityDeadlineMs && quote.orderValidityDeadlineMs > nowMs)
+      && Boolean(quote.expiryTimestampMs > nowMs);
+    checks.push({
+      ruleId: "POL-012",
+      description: "Order deadline, option expiry, and executability are current",
+      status: isRfqSpecification ? "NOT_EVALUATED" : validityPass ? "PASS" : "FAIL",
+      details: validityPass
+        ? "Order is executable now and both deadlines are in the future."
+        : "Current executability and deadline evidence is incomplete or expired.",
+    });
+    const quantityMatches = candidate.preview?.rawPreviewData?.numContracts !== undefined
+      && candidate.legs[0]?.resolvedOptionQuantity?.amountBaseUnits !== undefined
+      && BigInt(candidate.preview.rawPreviewData.numContracts) * 1_000_000_000_000n
+        === BigInt(candidate.legs[0].resolvedOptionQuantity.amountBaseUnits);
+    checks.push({
+      ruleId: "POL-013",
+      description: "Requested and SDK-previewed option quantities are exactly equal",
+      status: isRfqSpecification ? "NOT_EVALUATED" : quantityMatches ? "PASS" : "FAIL",
+      details: quantityMatches
+        ? "OptionBook 6-decimal contract quantity exactly equals the internal 18-decimal requested quantity."
+        : "Exact requested-to-previewed quantity equality was not proven.",
+    });
 
     const hasFail =
       checks.some(

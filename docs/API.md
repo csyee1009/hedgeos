@@ -216,7 +216,7 @@ All API endpoints return JSON. Every response includes an `x-request-id` header.
 ---
 
 ### 10. GET /api/v1/intents/:id/audit-receipt
-**Purpose**: Fetch immutable audit receipt for an intent.
+**Purpose**: Fetch the tamper-evident audit receipt for an intent.
 
 **Request**: None
 

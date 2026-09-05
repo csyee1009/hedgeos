@@ -5,9 +5,13 @@ import { FinancialConstitutionEngine } from "../src/services/FinancialConstituti
 import { HumanReviewService } from "../src/services/HumanReviewService";
 import { RFQSpecificationBuilder } from "../src/services/RFQSpecificationBuilder";
 import { ThetanutsSimulationService } from "../src/services/ThetanutsSimulationService";
+import { ThetanutsMarketService } from "../src/services/ThetanutsMarketService";
 import { CandidateStrategy, MarketQuote, TypedRiskIntent } from "../src/types";
 
 describe("Prompt 7 Repair: UI Capability Truth, Copy Audit, & Policy Integrity", () => {
+  const marketService = new ThetanutsMarketService("");
+  marketService.getOrderIdentityDigest = () => "controlled-test-order-digest";
+
   const confirmedIntent: TypedRiskIntent = {
     intentId: "intent-demo-701",
     version: 1,
@@ -59,8 +63,20 @@ describe("Prompt 7 Repair: UI Capability Truth, Copy Audit, & Policy Integrity",
     makerAddress: "0x1234567890abcdef1234567890abcdef12345678",
     orderIndex: 0,
     rawApiData: {
-      targetContract: "0x43063a482db1deb8ecf4177263b652882fa87431",
       timestampMs: Date.now(),
+    },
+    allStrikes: [{ amountBaseUnits: "230000000000", decimals: 8, symbol: "USD" }],
+    implementationAddress: "0x7355EB92dfb0503DB558a70c10843618932ab290",
+    implementationName: "PUT",
+    makerIsSeller: true,
+    rawOrderIsLong: true,
+    normalizedOptionType: "PUT",
+    rawOptionType: 1,
+    orderValidityDeadlineMs: Date.now() + 3_600_000,
+    eligibilityEvidence: {
+      status: "ELIGIBLE_LONG_PUT",
+      checkedAtMs: Date.now(),
+      checks: [],
     },
   };
 
@@ -101,7 +117,9 @@ describe("Prompt 7 Repair: UI Capability Truth, Copy Audit, & Policy Integrity",
       protocolFee: { amountBaseUnits: "0", decimals: 6, symbol: "USDC" },
       referrerFee: { amountBaseUnits: "0", decimals: 6, symbol: "USDC" },
       totalExpectedCost: { amountBaseUnits: "9000000", decimals: 6, symbol: "USDC" },
-      feeStatus: "ZERO_VERIFIED",
+      feeStatus: "INCOMPLETE",
+      buyerSpendStatus: "VERIFIED",
+      buyerSpendVerificationMode: "TOTAL_BUYER_SPEND_PROVEN",
       collateralToken: "USDC",
       previewTimestampMs: Date.now(),
       previewSource: "THETANUTS_OPTIONBOOK_PREVIEW",
@@ -144,14 +162,14 @@ describe("Prompt 7 Repair: UI Capability Truth, Copy Audit, & Policy Integrity",
   });
 
   it("Requirement 2: Proposal binding is strictly PREVIEW_BOUND with verified 1:1 sizing without claiming exact execution", () => {
-    const proposal = ActionProposalBuilder.buildOptionBookProposal(confirmedIntent, mockCandidate);
+    const proposal = ActionProposalBuilder.buildOptionBookProposal(confirmedIntent, mockCandidate, marketService);
     expect(proposal.bindingStatus).toBe("PREVIEW_BOUND");
     expect(proposal.bindingStatus).not.toBe("EXACT_TRANSACTION_BOUND");
     expect(proposal.authorizationStatus).toBe("UNAUTHORIZED");
   });
 
   it("Requirement 3: HumanReviewRecord enforces ELIGIBLE_HUMAN_REQUIRED boundary without execution authorization", () => {
-    const proposal = ActionProposalBuilder.buildOptionBookProposal(confirmedIntent, mockCandidate);
+    const proposal = ActionProposalBuilder.buildOptionBookProposal(confirmedIntent, mockCandidate, marketService);
     const simService = new ThetanutsSimulationService();
     const simResult: any = {
       simulationId: "sim-p7",
@@ -219,7 +237,7 @@ describe("Prompt 7 Repair: UI Capability Truth, Copy Audit, & Policy Integrity",
       },
     };
 
-    const proposal = ActionProposalBuilder.buildOptionBookProposal(confirmedIntent, staleCandidate);
+    const proposal = ActionProposalBuilder.buildOptionBookProposal(confirmedIntent, staleCandidate, marketService);
     const simService = new ThetanutsSimulationService();
     const simResult = await simService.simulateProposal(proposal, confirmedIntent, staleCandidate, 2400);
 

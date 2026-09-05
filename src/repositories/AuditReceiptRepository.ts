@@ -1,5 +1,6 @@
 import { AuditReceipt } from "../types";
 import { SqliteDatabase } from "./SqliteDatabase";
+import { AuditReceiptService } from "../services/AuditReceiptService";
 
 export class AuditReceiptRepository {
   private db: SqliteDatabase;
@@ -32,11 +33,11 @@ export class AuditReceiptRepository {
     if (!row) {
       return null;
     }
-    try {
-      return JSON.parse(row.payload_json);
-    } catch {
-      return null;
-    }
+    let receipt: AuditReceipt;
+    try { receipt = JSON.parse(row.payload_json) as AuditReceipt; }
+    catch { return null; }
+    if (!AuditReceiptService.verifyReceipt(receipt)) throw new Error("Stored audit receipt failed digest validation");
+    return receipt;
   }
 
   public async findByIntentId(intentId: string): Promise<AuditReceipt[]> {
@@ -46,11 +47,11 @@ export class AuditReceiptRepository {
     const rows = stmt.all(intentId) as Array<{ payload_json: string }>;
     const results: AuditReceipt[] = [];
     for (const r of rows) {
-      try {
-        results.push(JSON.parse(r.payload_json));
-      } catch {
-        // ignore malformed
-      }
+      let receipt: AuditReceipt;
+      try { receipt = JSON.parse(r.payload_json) as AuditReceipt; }
+      catch { continue; }
+      if (!AuditReceiptService.verifyReceipt(receipt)) throw new Error("Stored audit receipt failed digest validation");
+      results.push(receipt);
     }
     return results;
   }

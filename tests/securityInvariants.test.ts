@@ -17,6 +17,8 @@ describe("Prompt 8: Security Invariants Comprehensive Suite (SEC-001 through SEC
   const engine = new IntentEngine();
   const policyEngine = new FinancialConstitutionEngine();
   const simService = new ThetanutsSimulationService();
+  const marketService = new ThetanutsMarketService("");
+  marketService.getOrderIdentityDigest = () => "controlled-test-order-digest";
 
   const validConfirmedIntent: TypedRiskIntent = {
     intentId: "intent-sec-001",
@@ -67,8 +69,21 @@ describe("Prompt 8: Security Invariants Comprehensive Suite (SEC-001 through SEC
     availableQuantity: { amountBaseUnits: "5000000000000000000", decimals: 18, symbol: "ETH" },
     makerAddress: "0x1234567890abcdef1234567890abcdef12345678",
     orderIndex: 0,
-    rawApiData: { targetContract: "0x43063a482db1deb8ecf4177263b652882fa87431", timestampMs: Date.now() },
+    rawApiData: { timestampMs: Date.now() },
     executableNow: true,
+    allStrikes: [{ amountBaseUnits: "230000000000", decimals: 8, symbol: "USD" }],
+    implementationAddress: "0x7355EB92dfb0503DB558a70c10843618932ab290",
+    implementationName: "PUT",
+    makerIsSeller: true,
+    rawOrderIsLong: true,
+    normalizedOptionType: "PUT",
+    rawOptionType: 1,
+    orderValidityDeadlineMs: Date.now() + 3_600_000,
+    eligibilityEvidence: {
+      status: "ELIGIBLE_LONG_PUT",
+      checkedAtMs: Date.now(),
+      checks: [],
+    },
   };
 
   const validCandidate: CandidateStrategy = {
@@ -99,7 +114,9 @@ describe("Prompt 8: Security Invariants Comprehensive Suite (SEC-001 through SEC
       protocolFee: { amountBaseUnits: "0", decimals: 6, symbol: "USDC" },
       referrerFee: { amountBaseUnits: "0", decimals: 6, symbol: "USDC" },
       totalExpectedCost: { amountBaseUnits: "9000000", decimals: 6, symbol: "USDC" },
-      feeStatus: "ZERO_VERIFIED",
+      feeStatus: "INCOMPLETE",
+      buyerSpendStatus: "VERIFIED",
+      buyerSpendVerificationMode: "TOTAL_BUYER_SPEND_PROVEN",
       collateralToken: "USDC",
       previewTimestampMs: Date.now(),
       previewSource: "THETANUTS_OPTIONBOOK_PREVIEW",
@@ -227,7 +244,7 @@ describe("Prompt 8: Security Invariants Comprehensive Suite (SEC-001 through SEC
 
   // SEC-008: Edited Intent Invalidates Confirmation and Bound Proposal
   it("SEC-008: Proposal builder and simulation reject stale intent version", async () => {
-    const proposal = ActionProposalBuilder.buildOptionBookProposal(validConfirmedIntent, validCandidate);
+    const proposal = ActionProposalBuilder.buildOptionBookProposal(validConfirmedIntent, validCandidate, marketService);
     expect(proposal.intentId).toBe(validConfirmedIntent.intentId);
     expect(proposal.intentVersion).toBe(validConfirmedIntent.version);
 
@@ -247,7 +264,7 @@ describe("Prompt 8: Security Invariants Comprehensive Suite (SEC-001 through SEC
         previewTimestampMs: Date.now() - 120_000,
       },
     };
-    const proposal = ActionProposalBuilder.buildOptionBookProposal(validConfirmedIntent, staleCandidate);
+    const proposal = ActionProposalBuilder.buildOptionBookProposal(validConfirmedIntent, staleCandidate, marketService);
     const simResult = await simService.simulateProposal(proposal, validConfirmedIntent, staleCandidate, 2400);
 
     expect(simResult.status).toBe("STALE");
@@ -260,7 +277,7 @@ describe("Prompt 8: Security Invariants Comprehensive Suite (SEC-001 through SEC
 
   // SEC-010: Failed Preview/Simulation Cannot Become Successful
   it("SEC-010: Failed simulation prevents review presentation", () => {
-    const proposal = ActionProposalBuilder.buildOptionBookProposal(validConfirmedIntent, validCandidate);
+    const proposal = ActionProposalBuilder.buildOptionBookProposal(validConfirmedIntent, validCandidate, marketService);
     const failedSim: any = {
       simulationId: "sim-fail",
       proposalId: proposal.proposalId,
@@ -346,7 +363,7 @@ describe("Prompt 8: Security Invariants Comprehensive Suite (SEC-001 through SEC
 
   // SEC-015: No Wallet / Private Key / Signing / Broadcast Path
   it("SEC-015: Human review records and proposals have no execution submission method", () => {
-    const proposal = ActionProposalBuilder.buildOptionBookProposal(validConfirmedIntent, validCandidate);
+    const proposal = ActionProposalBuilder.buildOptionBookProposal(validConfirmedIntent, validCandidate, marketService);
     expect((proposal as any).privateKey).toBeUndefined();
     expect((proposal as any).signer).toBeUndefined();
     expect((proposal as any).sendTransaction).toBeUndefined();
@@ -355,7 +372,7 @@ describe("Prompt 8: Security Invariants Comprehensive Suite (SEC-001 through SEC
 
   // SEC-016: Human Review Does Not Authorize Execution
   it("SEC-016: Human review record enforces executionStatus = NOT_AUTHORIZED", () => {
-    const proposal = ActionProposalBuilder.buildOptionBookProposal(validConfirmedIntent, validCandidate);
+    const proposal = ActionProposalBuilder.buildOptionBookProposal(validConfirmedIntent, validCandidate, marketService);
     const simResult: any = {
       simulationId: "sim-sec",
       proposalId: proposal.proposalId,
@@ -370,7 +387,7 @@ describe("Prompt 8: Security Invariants Comprehensive Suite (SEC-001 through SEC
 
   // SEC-017: PREVIEW_BOUND Is Never Presented as Exact Guarantee
   it("SEC-017: Proposal bindingStatus is strictly PREVIEW_BOUND with TOCTOU disclosure", () => {
-    const proposal = ActionProposalBuilder.buildOptionBookProposal(validConfirmedIntent, validCandidate);
+    const proposal = ActionProposalBuilder.buildOptionBookProposal(validConfirmedIntent, validCandidate, marketService);
     expect(proposal.bindingStatus).toBe("PREVIEW_BOUND");
     expect(proposal.bindingStatus).not.toBe("EXACT_TRANSACTION_BOUND");
   });

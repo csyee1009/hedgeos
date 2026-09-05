@@ -230,10 +230,27 @@ export const PortfolioOnboarding: React.FC<PortfolioOnboardingProps> = ({
               <h2 style={{ fontSize: "1.35rem", margin: 0 }}>
                 Balances for this public address
               </h2>
-              <span className="badge badge-info">
-                Base Mainnet • Read-only snapshot
-                {snapshot.status === "PARTIAL" ? " • Partial" : ""}
-              </span>
+              {(() => {
+                const isDemoPortfolio =
+                  snapshot.warnings?.some(
+                    (warning) =>
+                      warning.includes(
+                        "RECORDED DEMO PORTFOLIO"
+                      )
+                  );
+
+                return (
+                  <span className="badge badge-info">
+                    {isDemoPortfolio
+                      ? "RECORDED DEMO PORTFOLIO • NOT LIVE FUNDS"
+                      : `Base Mainnet • Read-only snapshot${snapshot.status ===
+                        "PARTIAL"
+                        ? " • Partial"
+                        : ""
+                      }`}
+                  </span>
+                );
+              })()}
             </div>
 
             <p style={{ margin: 0, fontFamily: "monospace", fontSize: "0.9rem", color: "var(--text-secondary, #64748b)" }}>

@@ -37,6 +37,43 @@ export class ReadOnlyPortfolioService {
 
     const address = rawAddress.trim().toLowerCase();
 
+    const demoMode =
+      process.env.DEMO_PORTFOLIO_MODE ===
+      "true";
+
+    const demoAddress =
+      process.env.DEMO_PORTFOLIO_ADDRESS
+        ?.trim()
+        .toLowerCase();
+
+    if (
+      demoMode &&
+      demoAddress &&
+      address === demoAddress
+    ) {
+      return {
+        address,
+        chainId: 8453,
+        capturedAtMs: Date.now(),
+        balances: [
+          {
+            asset: "ETH",
+            displaySymbol: "ETH",
+            amountBaseUnits:
+              "2000000000000000000",
+            decimals: 18,
+            formattedAmount: "2.0",
+            source:
+              "RECORDED_DEMO_PORTFOLIO",
+          },
+        ],
+        status: "AVAILABLE",
+        warnings: [
+          "RECORDED DEMO PORTFOLIO — NOT LIVE FUNDS. The address is user-controlled, but the displayed 2 ETH balance is synthetic demo data.",
+        ],
+      };
+    }
+
     if (!this.rpcUrl) {
       return {
         address,

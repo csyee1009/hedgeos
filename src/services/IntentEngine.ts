@@ -1,4 +1,7 @@
-import { AIIntentProvider, ParseResult } from "../providers/interfaces/AIIntentProvider";
+import {
+  AIIntentProvider,
+  ParseResult,
+} from "../providers/interfaces/AIIntentProvider";
 import { PROMPT_VERSION } from "../providers/prompts/intentExtractionPrompt";
 import {
   HorizonTarget,
@@ -7,49 +10,93 @@ import {
 } from "../types";
 import { parseExactDecimal } from "../utils/decimalParser";
 
-const MYT_OFFSET_MS = 8 * 60 * 60 * 1000;
-const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+const MYT_OFFSET_MS =
+  8 * 60 * 60 * 1000;
 
-function formatMYTHorizon(timestampMs: number): HorizonTarget {
-  if (!Number.isFinite(timestampMs) || timestampMs <= 0) {
-    throw new Error("Invalid horizon timestamp");
+const ONE_DAY_MS =
+  24 * 60 * 60 * 1000;
+
+/* ================================================================
+ * TIME HELPERS
+ * ================================================================ */
+
+function formatMYTHorizon(
+  timestampMs: number
+): HorizonTarget {
+  if (
+    !Number.isFinite(
+      timestampMs
+    ) ||
+    timestampMs <= 0
+  ) {
+    throw new Error(
+      "Invalid horizon timestamp"
+    );
   }
 
-  const date = new Date(timestampMs);
+  const date =
+    new Date(timestampMs);
 
-  const options: Intl.DateTimeFormatOptions = {
+  const options:
+    Intl.DateTimeFormatOptions =
+  {
     weekday: "long",
     day: "numeric",
     month: "long",
     year: "numeric",
     hour: "numeric",
     minute: "numeric",
-    timeZone: "Asia/Kuala_Lumpur",
+    timeZone:
+      "Asia/Kuala_Lumpur",
     hour12: true,
   };
 
   return {
     timestampMs,
-    isoString: date.toISOString(),
-    formattedDisplay: `${new Intl.DateTimeFormat(
-      "en-US",
-      options
-    ).format(date)} MYT`,
-    timezone: "Asia/Kuala_Lumpur (MYT, UTC+8)",
+
+    isoString:
+      date.toISOString(),
+
+    formattedDisplay:
+      `${new Intl.DateTimeFormat(
+        "en-US",
+        options
+      ).format(date)} MYT`,
+
+    timezone:
+      "Asia/Kuala_Lumpur (MYT, UTC+8)",
   };
 }
 
+/**
+ * Resolves the next Friday at 23:59:59.999 MYT.
+ *
+ * IMPORTANT:
+ * The returned timestamp is deterministic parser output.
+ * Whether it requires confirmation is decided by the caller.
+ */
 export function getNextFridayMYT(
   nowMs: number = Date.now()
 ): HorizonTarget {
-  const nowMYT = new Date(nowMs + MYT_OFFSET_MS);
+  const nowMYT =
+    new Date(
+      nowMs + MYT_OFFSET_MS
+    );
 
-  const year = nowMYT.getUTCFullYear();
-  const month = nowMYT.getUTCMonth();
-  const date = nowMYT.getUTCDate();
-  const day = nowMYT.getUTCDay();
+  const year =
+    nowMYT.getUTCFullYear();
 
-  let daysUntilFriday = (5 - day + 7) % 7;
+  const month =
+    nowMYT.getUTCMonth();
+
+  const date =
+    nowMYT.getUTCDate();
+
+  const day =
+    nowMYT.getUTCDay();
+
+  const daysUntilFriday =
+    (5 - day + 7) % 7;
 
   let targetUtcMs =
     Date.UTC(
@@ -62,29 +109,44 @@ export function getNextFridayMYT(
       999
     ) - MYT_OFFSET_MS;
 
+  /*
+   * If it is already after Friday end-of-day MYT,
+   * move to the following Friday.
+   */
   if (targetUtcMs <= nowMs) {
-    targetUtcMs += 7 * ONE_DAY_MS;
+    targetUtcMs +=
+      7 * ONE_DAY_MS;
   }
 
-  return formatMYTHorizon(targetUtcMs);
+  return formatMYTHorizon(
+    targetUtcMs
+  );
 }
 
 function getFollowingFridayMYT(
   nowMs: number = Date.now()
 ): HorizonTarget {
-  const nextFriday = getNextFridayMYT(nowMs);
+  const nextFriday =
+    getNextFridayMYT(
+      nowMs
+    );
 
   return formatMYTHorizon(
-    nextFriday.timestampMs + 7 * ONE_DAY_MS
+    nextFriday.timestampMs +
+    7 * ONE_DAY_MS
   );
 }
 
+/**
+ * Explicit YYYY-MM-DD dates resolve to end-of-day MYT.
+ */
 export function parseIsoDateMYT(
   dateStr: string
 ): HorizonTarget {
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(
-    dateStr
-  );
+  const match =
+    /^(\d{4})-(\d{2})-(\d{2})$/.exec(
+      dateStr
+    );
 
   if (!match) {
     throw new Error(
@@ -92,9 +154,14 @@ export function parseIsoDateMYT(
     );
   }
 
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  const day = Number(match[3]);
+  const year =
+    Number(match[1]);
+
+  const month =
+    Number(match[2]);
+
+  const day =
+    Number(match[3]);
 
   if (
     !Number.isInteger(year) ||
@@ -110,14 +177,25 @@ export function parseIsoDateMYT(
     );
   }
 
-  const calendarCheck = new Date(
-    Date.UTC(year, month - 1, day)
-  );
+  /*
+   * Reject impossible dates such as 2026-02-31.
+   */
+  const calendarCheck =
+    new Date(
+      Date.UTC(
+        year,
+        month - 1,
+        day
+      )
+    );
 
   if (
-    calendarCheck.getUTCFullYear() !== year ||
-    calendarCheck.getUTCMonth() !== month - 1 ||
-    calendarCheck.getUTCDate() !== day
+    calendarCheck.getUTCFullYear() !==
+    year ||
+    calendarCheck.getUTCMonth() !==
+    month - 1 ||
+    calendarCheck.getUTCDate() !==
+    day
   ) {
     throw new Error(
       `Non-existent calendar date '${dateStr}'`
@@ -135,16 +213,25 @@ export function parseIsoDateMYT(
       999
     ) - MYT_OFFSET_MS;
 
-  return formatMYTHorizon(targetUtcMs);
+  return formatMYTHorizon(
+    targetUtcMs
+  );
 }
 
 export function formatCustomHorizon(
   timestampMs: number
 ): HorizonTarget {
-  return formatMYTHorizon(timestampMs);
+  return formatMYTHorizon(
+    timestampMs
+  );
 }
 
-export class IntentEngine implements AIIntentProvider {
+/* ================================================================
+ * DETERMINISTIC DEVELOPMENT ADAPTER
+ * ================================================================ */
+
+export class IntentEngine
+  implements AIIntentProvider {
   public readonly adapterName =
     "DEVELOPMENT_ADAPTER" as const;
 
@@ -154,98 +241,168 @@ export class IntentEngine implements AIIntentProvider {
   public async parseNaturalLanguage(
     prompt: string
   ): Promise<ParseResult> {
-    const nowMs = Date.now();
-    const ambiguities: string[] = [];
-    const missingFields: string[] = [];
-    const safePrompt =
-      typeof prompt === "string" ? prompt.trim() : "";
+    const requestStartedAtMs =
+      Date.now();
 
-    const addMissingField = (field: string) => {
-      if (!missingFields.includes(field)) {
-        missingFields.push(field);
+    const nowMs =
+      requestStartedAtMs;
+
+    const safePrompt =
+      typeof prompt === "string"
+        ? prompt.trim()
+        : "";
+
+    const ambiguities:
+      string[] = [];
+
+    const missingFields:
+      string[] = [];
+
+    const addMissingField = (
+      field: string
+    ): void => {
+      if (
+        !missingFields.includes(
+          field
+        )
+      ) {
+        missingFields.push(
+          field
+        );
       }
     };
 
+    const addAmbiguity = (
+      message: string
+    ): void => {
+      if (
+        !ambiguities.includes(
+          message
+        )
+      ) {
+        ambiguities.push(
+          message
+        );
+      }
+    };
+
+    /* ============================================================
+     * 1. OBJECTIVE SCOPE
+     * ============================================================ */
+
     const isUnsupported =
-      /\b(leverage|speculate|speculation|arbitrage|staking|stake|flash loan|trading bot|yield farming|yield|naked call|short call|10x)\b/i.test(
+      /\b(leverage|leveraged|speculate|speculation|arbitrage|staking|stake|flash loan|trading bot|yield farming|yield generation|naked call|short call|10x)\b/i.test(
         safePrompt
       );
 
-    let unsupportedObjective = false;
-    let unsupportedObjectiveReason:
-      | string
-      | undefined;
+    const unsupportedObjective =
+      isUnsupported;
 
-    if (isUnsupported) {
-      unsupportedObjective = true;
-      unsupportedObjectiveReason =
-        "HedgeOS currently supports Downside Protection intents only. Speculation, yield generation, and trading bot strategies are not supported in this MVP.";
-    }
+    const unsupportedObjectiveReason =
+      unsupportedObjective
+        ? "HedgeOS currently supports Downside Protection intents only. Speculation, yield generation, leverage, arbitrage, and autonomous trading strategies are not supported in this MVP."
+        : undefined;
+
+    /* ============================================================
+     * 2. ASSET
+     *
+     * Only explicit ETH/WETH or BTC/cbBTC text is accepted.
+     * ============================================================ */
 
     const unsupportedAssetMatch =
-      safePrompt.match(/\b(SOL)\b/i);
+      safePrompt.match(
+        /\bSOL\b/i
+      );
 
-    if (unsupportedAssetMatch) {
-      ambiguities.push(
-        `${unsupportedAssetMatch[1].toUpperCase()} is not currently supported by HedgeOS's verified protective-option sizing path. Please use a supported asset such as ETH or BTC.`
+    if (
+      unsupportedAssetMatch
+    ) {
+      addAmbiguity(
+        "SOL is not currently supported by HedgeOS's verified protective-option sizing path. Current verified assets are ETH/WETH and BTC/cbBTC."
       );
     }
 
-    const exposureAssetMatch = safePrompt.match(
-      /(?:protect|have|hold|holding|my)?\s*(\d+(?:\.\d+)?)?\s*\b(ETH|WETH|BTC|CBBTC)\b/i
-    );
+    const explicitAssetMatch =
+      safePrompt.match(
+        /\b(ETH|WETH|BTC|CBBTC)\b/i
+      );
 
-    const budgetMatch = safePrompt.match(
-      /(-?\d+(?:\.\d+)?)\s*USDC\b/i
-    );
+    let assetValue:
+      "ETH" | "BTC" | null =
+      null;
 
-    let assetValue: string | null = null;
-    let assetPhrase: string | undefined;
+    let assetPhrase:
+      string | undefined;
 
     if (
-      exposureAssetMatch &&
-      exposureAssetMatch[2]
+      explicitAssetMatch?.[1]
     ) {
-      const parsedAsset =
-        exposureAssetMatch[2].toUpperCase();
+      const rawAsset =
+        explicitAssetMatch[1]
+          .toUpperCase();
 
       assetValue =
-        parsedAsset === "WETH"
+        rawAsset === "ETH" ||
+          rawAsset === "WETH"
           ? "ETH"
-          : parsedAsset === "CBBTC"
-            ? "BTC"
-            : parsedAsset;
+          : "BTC";
 
       assetPhrase =
-        exposureAssetMatch[0].trim();
+        explicitAssetMatch[0];
     } else {
-      addMissingField("asset");
+      addMissingField(
+        "asset"
+      );
     }
 
-    const amountMatch = safePrompt.match(
-      /(-?\d+(?:\.\d+)?)\s*(ETH|WETH|BTC|CBBTC)\b/i
-    );
+    /* ============================================================
+     * 3. EXPOSURE
+     *
+     * Quantity must be directly adjacent to a supported asset.
+     * Example:
+     *   2 ETH
+     *   0.5 BTC
+     *
+     * The parser never invents exposure from the asset alone.
+     * ============================================================ */
+
+    const amountMatch =
+      safePrompt.match(
+        /(-?\d+(?:\.\d+)?)\s*(ETH|WETH|BTC|CBBTC)\b/i
+      );
 
     let exposureAmountValue:
-      | ParsedRiskIntentDraft["exposureAmount"]
-      | null = null;
+      ParsedRiskIntentDraft["exposureAmount"] =
+      null;
 
-    if (amountMatch && assetValue) {
-      const rawAmountStr = amountMatch[1];
+    if (
+      amountMatch &&
+      assetValue
+    ) {
+      const rawAmount =
+        amountMatch[1];
 
-      const numericAmount =
-        Number(rawAmountStr);
+      const amountAsset =
+        amountMatch[2]
+          .toUpperCase();
+
+      const canonicalAmountAsset:
+        "ETH" | "BTC" =
+        amountAsset === "ETH" ||
+          amountAsset === "WETH"
+          ? "ETH"
+          : "BTC";
 
       if (
-        !Number.isFinite(numericAmount) ||
-        numericAmount <= 0
+        canonicalAmountAsset !==
+        assetValue
       ) {
-        ambiguities.push(
-          `Invalid non-positive exposure amount '${rawAmountStr}'. A positive amount is required.`
-        );
-
         addMissingField(
           "exposureAmount"
+        );
+
+        addAmbiguity(
+          `Exposure quantity refers to ${canonicalAmountAsset}, while the resolved asset is ${assetValue}.`
         );
       } else {
         try {
@@ -256,26 +413,48 @@ export class IntentEngine implements AIIntentProvider {
 
           const parsedAmount =
             parseExactDecimal(
-              rawAmountStr,
+              rawAmount,
               decimals,
               assetValue
             );
 
-          exposureAmountValue = {
-            value: parsedAmount,
-            source: "USER_EXPLICIT",
+          if (
+            BigInt(
+              parsedAmount
+                .amountBaseUnits
+            ) <= 0n
+          ) {
+            throw new Error(
+              "Exposure must be positive"
+            );
+          }
+
+          exposureAmountValue =
+          {
+            value:
+              parsedAmount,
+
+            source:
+              "USER_EXPLICIT",
+
             confidence: 1,
-            requiresConfirmation: false,
+
+            requiresConfirmation:
+              false,
+
             originalPhrase:
               amountMatch[0],
+
+            rawUserInput:
+              safePrompt,
           };
         } catch {
-          ambiguities.push(
-            `Exposure amount '${rawAmountStr}' could not be represented safely for ${assetValue}. Please enter a valid amount.`
-          );
-
           addMissingField(
             "exposureAmount"
+          );
+
+          addAmbiguity(
+            `Exposure amount '${rawAmount}' is invalid or cannot be represented exactly for ${assetValue}.`
           );
         }
       }
@@ -285,42 +464,66 @@ export class IntentEngine implements AIIntentProvider {
       );
     }
 
+    /* ============================================================
+     * 4. TARGET MAX LOSS
+     *
+     * Financial thresholds require an explicit percent marker.
+     *
+     * Accepted:
+     *   8%
+     *   8 percent
+     *   8 pct
+     *
+     * We deliberately DO NOT convert "max loss 8" into 8%.
+     * ============================================================ */
+
     const lossMatch =
       safePrompt.match(
         /(-?\d+(?:\.\d+)?)\s*(?:%|percent\b|pct\b)/i
-      ) ||
-      safePrompt.match(
-        /(?:max|maximum|cap|drop|down|downside|loss|lose|down more than|greater than)\s*(?:of|at|around)?\s*(-?\d+(?:\.\d+)?)(?:\s*(?:%|percent|pct))?/i
       );
 
     let lossValue:
-      | ParsedRiskIntentDraft["targetMaxLossPercent"]
-      | null = null;
+      ParsedRiskIntentDraft["targetMaxLossPercent"] =
+      null;
 
     if (lossMatch) {
       const rawPercent =
-        Number(lossMatch[1]);
+        Number(
+          lossMatch[1]
+        );
 
       if (
-        !Number.isFinite(rawPercent) ||
+        !Number.isFinite(
+          rawPercent
+        ) ||
         rawPercent <= 0 ||
         rawPercent > 100
       ) {
-        ambiguities.push(
-          `Invalid maximum loss percentage '${lossMatch[1]}%'. Enter a value greater than 0% and no more than 100%.`
-        );
-
         addMissingField(
           "targetMaxLossPercent"
         );
+
+        addAmbiguity(
+          `Invalid maximum loss percentage '${lossMatch[1]}%'. Enter a value greater than 0% and no more than 100%.`
+        );
       } else {
         lossValue = {
-          value: rawPercent,
-          source: "USER_EXPLICIT",
+          value:
+            rawPercent,
+
+          source:
+            "USER_EXPLICIT",
+
           confidence: 1,
-          requiresConfirmation: false,
+
+          requiresConfirmation:
+            false,
+
           originalPhrase:
             lossMatch[0],
+
+          rawUserInput:
+            safePrompt,
         };
       }
     } else {
@@ -329,54 +532,70 @@ export class IntentEngine implements AIIntentProvider {
       );
     }
 
+    /* ============================================================
+     * 5. PROTECTION BUDGET
+     *
+     * Current execution path requires explicit USDC.
+     * ============================================================ */
+
+    const budgetMatch =
+      safePrompt.match(
+        /(-?\d+(?:\.\d+)?)\s*USDC\b/i
+      );
+
     let budgetValue:
-      | ParsedRiskIntentDraft["maxPremiumUSDC"]
-      | null = null;
+      ParsedRiskIntentDraft["maxPremiumUSDC"] =
+      null;
 
     if (budgetMatch) {
-      const rawBudgetStr =
+      const rawBudget =
         budgetMatch[1];
 
-      const numericBudget =
-        Number(rawBudgetStr);
+      try {
+        const parsedBudget =
+          parseExactDecimal(
+            rawBudget,
+            6,
+            "USDC"
+          );
 
-      if (
-        !Number.isFinite(numericBudget) ||
-        numericBudget < 0
-      ) {
-        ambiguities.push(
-          `Invalid negative protection budget '${rawBudgetStr} USDC'.`
-        );
+        if (
+          BigInt(
+            parsedBudget
+              .amountBaseUnits
+          ) < 0n
+        ) {
+          throw new Error(
+            "Negative budget"
+          );
+        }
 
+        budgetValue = {
+          value:
+            parsedBudget,
+
+          source:
+            "USER_EXPLICIT",
+
+          confidence: 1,
+
+          requiresConfirmation:
+            false,
+
+          originalPhrase:
+            budgetMatch[0],
+
+          rawUserInput:
+            safePrompt,
+        };
+      } catch {
         addMissingField(
           "maxPremiumUSDC"
         );
-      } else {
-        try {
-          const parsedBudget =
-            parseExactDecimal(
-              rawBudgetStr,
-              6,
-              "USDC"
-            );
 
-          budgetValue = {
-            value: parsedBudget,
-            source: "USER_EXPLICIT",
-            confidence: 1,
-            requiresConfirmation: false,
-            originalPhrase:
-              budgetMatch[0],
-          };
-        } catch {
-          ambiguities.push(
-            `Protection budget '${rawBudgetStr} USDC' could not be represented safely. Please enter a valid USDC amount.`
-          );
-
-          addMissingField(
-            "maxPremiumUSDC"
-          );
-        }
+        addAmbiguity(
+          `Protection budget '${rawBudget} USDC' is invalid or cannot be represented exactly.`
+        );
       }
     } else {
       addMissingField(
@@ -384,9 +603,26 @@ export class IntentEngine implements AIIntentProvider {
       );
     }
 
+    /* ============================================================
+     * 6. HORIZON
+     *
+     * CRITICAL PROVENANCE RULE:
+     *
+     * Explicit YYYY-MM-DD:
+     *   USER_EXPLICIT
+     *   requiresConfirmation = false
+     *
+     * Relative phrases:
+     *   PARSER_INFERRED
+     *   requiresConfirmation = true
+     *
+     * This is intentionally aligned with LLMOutputValidator and
+     * SimpleSituationService.
+     * ============================================================ */
+
     let horizonValue:
-      | ParsedRiskIntentDraft["horizonTimestamp"]
-      | null = null;
+      ParsedRiskIntentDraft["horizonTimestamp"] =
+      null;
 
     const isoDateMatch =
       safePrompt.match(
@@ -395,22 +631,27 @@ export class IntentEngine implements AIIntentProvider {
 
     const daysMatch =
       safePrompt.match(
-        /(?:for|in)\s*(\d+)\s*days?\b/i
+        /\b(?:for|in)\s+(\d+)\s+days?\b/i
       );
 
-    const hasFriday =
-      /\b(?:until|through|by)?\s*friday\b/i.test(
-        safePrompt
+    const nextWeekMatch =
+      safePrompt.match(
+        /\bnext\s+week\b/i
       );
 
-    const hasWeekend =
-      /\b(?:this\s+)?weekend\b/i.test(
-        safePrompt
+    const thisWeekMatch =
+      safePrompt.match(
+        /\bthis\s+week\b/i
       );
 
-    const hasNextWeek =
-      /\bnext\s+week\b/i.test(
-        safePrompt
+    const weekendMatch =
+      safePrompt.match(
+        /\b(?:this\s+)?weekend\b/i
+      );
+
+    const fridayMatch =
+      safePrompt.match(
+        /\b(?:until|through|by)?\s*friday\b/i
       );
 
     if (isoDateMatch) {
@@ -424,104 +665,186 @@ export class IntentEngine implements AIIntentProvider {
           parsedHorizon.timestampMs <=
           nowMs
         ) {
-          ambiguities.push(
-            `Requested horizon date (${isoDateMatch[1]}) is in the past. A future date is required.`
-          );
-
           addMissingField(
             "horizonTimestamp"
           );
+
+          addAmbiguity(
+            `Requested horizon date (${isoDateMatch[1]}) is in the past. A future date is required.`
+          );
         } else {
           horizonValue = {
-            value: parsedHorizon,
-            source: "USER_EXPLICIT",
+            value:
+              parsedHorizon,
+
+            source:
+              "USER_EXPLICIT",
+
             confidence: 1,
-            requiresConfirmation: false,
+
+            requiresConfirmation:
+              false,
+
             originalPhrase:
               isoDateMatch[0],
+
+            rawUserInput:
+              safePrompt,
           };
         }
       } catch {
-        ambiguities.push(
-          `Invalid calendar date '${isoDateMatch[1]}'.`
-        );
-
         addMissingField(
           "horizonTimestamp"
+        );
+
+        addAmbiguity(
+          `Invalid calendar date '${isoDateMatch[1]}'.`
         );
       }
     } else if (daysMatch) {
-      const daysCount =
-        Number(daysMatch[1]);
-
-      if (
-        !Number.isInteger(daysCount) ||
-        daysCount <= 0
-      ) {
-        ambiguities.push(
-          "Protection duration must be at least 1 day."
+      const days =
+        Number(
+          daysMatch[1]
         );
 
+      if (
+        !Number.isInteger(days) ||
+        days <= 0
+      ) {
         addMissingField(
           "horizonTimestamp"
         );
-      } else {
-        const targetUtcMs =
-          nowMs +
-          daysCount * ONE_DAY_MS;
 
+        addAmbiguity(
+          "Protection duration must be at least one day."
+        );
+      } else {
         horizonValue = {
           value:
             formatCustomHorizon(
-              targetUtcMs
+              nowMs +
+              days *
+              ONE_DAY_MS
             ),
-          source: "USER_EXPLICIT",
+
+          source:
+            "PARSER_INFERRED",
+
           confidence: 0.95,
-          requiresConfirmation: false,
+
+          requiresConfirmation:
+            true,
+
           originalPhrase:
             daysMatch[0],
+
+          rawUserInput:
+            safePrompt,
         };
       }
-    } else if (hasNextWeek) {
+    } else if (
+      nextWeekMatch
+    ) {
       horizonValue = {
         value:
           getFollowingFridayMYT(
             nowMs
           ),
-        source: "USER_EXPLICIT",
+
+        source:
+          "PARSER_INFERRED",
+
         confidence: 0.9,
-        requiresConfirmation: false,
+
+        requiresConfirmation:
+          true,
+
         originalPhrase:
-          "next week",
+          nextWeekMatch[0],
+
+        rawUserInput:
+          safePrompt,
       };
     } else if (
-      hasFriday ||
-      hasWeekend
+      thisWeekMatch
     ) {
       horizonValue = {
         value:
           getNextFridayMYT(
             nowMs
           ),
-        source: "USER_EXPLICIT",
-        confidence:
-          hasFriday ? 0.95 : 0.9,
-        requiresConfirmation: false,
-        originalPhrase: hasFriday
-          ? "until Friday"
-          : "through this weekend",
+
+        source:
+          "PARSER_INFERRED",
+
+        confidence: 0.9,
+
+        requiresConfirmation:
+          true,
+
+        originalPhrase:
+          thisWeekMatch[0],
+
+        rawUserInput:
+          safePrompt,
       };
     } else if (
-      /\b(soon|later|next month)\b/i.test(
+      weekendMatch
+    ) {
+      horizonValue = {
+        value:
+          getNextFridayMYT(
+            nowMs
+          ),
+
+        source:
+          "PARSER_INFERRED",
+
+        confidence: 0.9,
+
+        requiresConfirmation:
+          true,
+
+        originalPhrase:
+          weekendMatch[0],
+
+        rawUserInput:
+          safePrompt,
+      };
+    } else if (
+      fridayMatch
+    ) {
+      horizonValue = {
+        value:
+          getNextFridayMYT(
+            nowMs
+          ),
+
+        source:
+          "PARSER_INFERRED",
+
+        confidence: 0.95,
+
+        requiresConfirmation:
+          true,
+
+        originalPhrase:
+          fridayMatch[0].trim(),
+
+        rawUserInput:
+          safePrompt,
+      };
+    } else if (
+      /\b(soon|later|someday|eventually|next month|in the future)\b/i.test(
         safePrompt
       )
     ) {
-      ambiguities.push(
-        "Protection horizon is ambiguous. Please select an exact future date."
-      );
-
       addMissingField(
         "horizonTimestamp"
+      );
+
+      addAmbiguity(
+        "Protection horizon is ambiguous. Please select an exact future date or a supported relative horizon."
       );
     } else {
       addMissingField(
@@ -529,63 +852,126 @@ export class IntentEngine implements AIIntentProvider {
       );
     }
 
-    const hasSpreadPermission =
-      /\b(okay using a put spread|allow put spreads?|allow multi-leg|explicitly allow put spread|put spread if appropriate)\b/i.test(
-        safePrompt
+    /* ============================================================
+     * 7. MULTI-LEG PERMISSION
+     *
+     * The presence of the words "put spread" alone is NOT authority.
+     * The user must explicitly permit it.
+     * ============================================================ */
+
+    const spreadPermissionMatch =
+      safePrompt.match(
+        /\b(?:allow\s+(?:a\s+)?put\s+spread|allow\s+put\s+spreads?|allow\s+multi-leg|use\s+(?:a\s+)?put\s+spread|put\s+spread\s+is\s+(?:okay|ok)|multi-leg\s+is\s+(?:okay|ok))\b/i
       );
 
-    const providerMetadata: LLMProviderMetadata =
-    {
+    const hasSpreadPermission =
+      Boolean(
+        spreadPermissionMatch
+      );
+
+    /* ============================================================
+     * 8. PROVIDER METADATA
+     * ============================================================ */
+
+    const responseTimestampMs =
+      Date.now();
+
+    const providerMetadata:
+      LLMProviderMetadata = {
       providerType:
         "DEVELOPMENT_ADAPTER",
-      status: "AVAILABLE",
+
+      status:
+        "AVAILABLE",
+
       modelIdentifier:
         "deterministic-development-adapter",
+
       promptVersion:
         PROMPT_VERSION,
-      latencyMs: 1,
+
+      latencyMs:
+        Math.max(
+          0,
+          responseTimestampMs -
+          requestStartedAtMs
+        ),
+
       requestTimestampMs:
-        nowMs,
-      responseTimestampMs:
-        Date.now(),
+        requestStartedAtMs,
+
+      responseTimestampMs,
     };
 
-    const candidateDraft: ParsedRiskIntentDraft =
-    {
-      intentId: `intent-${Math.random()
-        .toString(36)
-        .substring(2, 9)}`,
+    /* ============================================================
+     * 9. DRAFT
+     * ============================================================ */
+
+    const requiresClarification =
+      missingFields.length > 0 ||
+      ambiguities.length > 0 ||
+      unsupportedObjective ||
+      Boolean(
+        horizonValue
+          ?.requiresConfirmation
+      );
+
+    const candidateDraft:
+      ParsedRiskIntentDraft = {
+      intentId:
+        `intent-${Math.random()
+          .toString(36)
+          .substring(2, 9)}`,
 
       version: 1,
 
-      createdAtMs: nowMs,
+      createdAtMs:
+        nowMs,
 
-      updatedAtMs: nowMs,
+      updatedAtMs:
+        nowMs,
 
-      confirmedByUser: false,
+      /*
+       * Server-owned invariant.
+       * Parsing can NEVER confirm a financial intent.
+       */
+      confirmedByUser:
+        false,
 
       objective: {
         value:
           "DOWNSIDE_PROTECTION",
+
         source:
           "SYSTEM_DEFAULT",
+
         confidence: 1,
+
         requiresConfirmation:
           false,
       },
 
-      asset: assetValue
-        ? {
-          value: assetValue,
-          source:
-            "USER_EXPLICIT",
-          confidence: 1,
-          requiresConfirmation:
-            false,
-          originalPhrase:
-            assetPhrase,
-        }
-        : null,
+      asset:
+        assetValue
+          ? {
+            value:
+              assetValue,
+
+            source:
+              "USER_EXPLICIT",
+
+            confidence: 1,
+
+            requiresConfirmation:
+              false,
+
+            originalPhrase:
+              assetPhrase,
+
+            rawUserInput:
+              safePrompt,
+          }
+          : null,
 
       exposureAmount:
         exposureAmountValue,
@@ -600,10 +986,15 @@ export class IntentEngine implements AIIntentProvider {
         horizonValue,
 
       allowedProtocols: {
-        value: ["THETANUTS"],
+        value: [
+          "THETANUTS",
+        ],
+
         source:
           "SYSTEM_DEFAULT",
+
         confidence: 1,
+
         requiresConfirmation:
           false,
       },
@@ -623,8 +1014,11 @@ export class IntentEngine implements AIIntentProvider {
           false,
 
         originalPhrase:
+          spreadPermissionMatch?.[0],
+
+        rawUserInput:
           hasSpreadPermission
-            ? "spread"
+            ? safePrompt
             : undefined,
       },
 
@@ -633,18 +1027,22 @@ export class IntentEngine implements AIIntentProvider {
       ambiguitiesFound:
         ambiguities.map(
           (reason) => ({
-            field: "intent",
-            detectedText: "",
+            field:
+              this.inferAmbiguityField(
+                reason
+              ),
+
+            detectedText:
+              "",
+
             reason,
+
             suggestedValue:
-              null,
+              undefined,
           })
         ),
 
-      requiresClarification:
-        missingFields.length > 0 ||
-        ambiguities.length > 0 ||
-        unsupportedObjective,
+      requiresClarification,
 
       originalPromptText:
         safePrompt,
@@ -663,9 +1061,7 @@ export class IntentEngine implements AIIntentProvider {
 
       missingFields,
 
-      requiresClarification:
-        candidateDraft.requiresClarification ||
-        false,
+      requiresClarification,
 
       unsupportedObjective,
 
@@ -673,5 +1069,60 @@ export class IntentEngine implements AIIntentProvider {
 
       providerMetadata,
     };
+  }
+
+  private inferAmbiguityField(
+    reason: string
+  ): string {
+    const lower =
+      reason.toLowerCase();
+
+    if (
+      lower.includes("asset")
+    ) {
+      return "asset";
+    }
+
+    if (
+      lower.includes(
+        "exposure"
+      )
+    ) {
+      return "exposureAmount";
+    }
+
+    if (
+      lower.includes(
+        "percentage"
+      ) ||
+      lower.includes("loss")
+    ) {
+      return "targetMaxLossPercent";
+    }
+
+    if (
+      lower.includes(
+        "budget"
+      ) ||
+      lower.includes(
+        "usdc"
+      )
+    ) {
+      return "maxPremiumUSDC";
+    }
+
+    if (
+      lower.includes(
+        "horizon"
+      ) ||
+      lower.includes("date") ||
+      lower.includes(
+        "duration"
+      )
+    ) {
+      return "horizonTimestamp";
+    }
+
+    return "intent";
   }
 }

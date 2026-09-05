@@ -2,16 +2,20 @@ import { z } from "zod";
 import {
   AmbiguityResolution,
   FieldProvenance,
-  FieldProvenanceSource,
   HorizonTarget,
-  LLMIntentExtractionDTO,
   LLMProviderMetadata,
   ParsedRiskIntentDraft,
   RiskObjective,
   TokenAmount,
 } from "../types";
 import { parseExactDecimal } from "../utils/decimalParser";
-import { getNextFridayMYT, parseIsoDateMYT } from "./IntentEngine";
+import {
+  formatCustomHorizon,
+  getNextFridayMYT,
+  parseIsoDateMYT,
+} from "./IntentEngine";
+
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 
 export const FORBIDDEN_AUTHORITY_FIELDS = [
   "confirmedByUser",
@@ -30,63 +34,136 @@ export const FORBIDDEN_AUTHORITY_FIELDS = [
   "signature",
 ] as const;
 
-// Strict Zod schema for untrusted LLM extraction DTO — STRICT TOP-LEVEL AND SUB-OBJECT SCHEMAS
 export const LLMIntentExtractionDTOSchema = z
   .object({
-    objective: z.string().optional().nullable(),
-    unsupportedObjectiveReason: z.string().optional().nullable(),
+    objective: z
+      .string()
+      .optional()
+      .nullable(),
+
+    unsupportedObjectiveReason: z
+      .string()
+      .optional()
+      .nullable(),
+
     asset: z
       .object({
-        value: z.string().optional().nullable(),
-        evidence: z.string().optional().nullable(),
+        value: z
+          .string()
+          .optional()
+          .nullable(),
+
+        evidence: z
+          .string()
+          .optional()
+          .nullable(),
       })
       .strict()
       .optional()
       .nullable(),
+
     exposureAmount: z
       .object({
-        value: z.string().optional().nullable(),
-        unit: z.string().optional().nullable(),
-        evidence: z.string().optional().nullable(),
+        value: z
+          .string()
+          .optional()
+          .nullable(),
+
+        unit: z
+          .string()
+          .optional()
+          .nullable(),
+
+        evidence: z
+          .string()
+          .optional()
+          .nullable(),
       })
       .strict()
       .optional()
       .nullable(),
+
     targetMaxLossPercent: z
       .object({
-        value: z.union([z.string(), z.number()]).optional().nullable(),
-        evidence: z.string().optional().nullable(),
+        value: z
+          .union([
+            z.string(),
+            z.number(),
+          ])
+          .optional()
+          .nullable(),
+
+        evidence: z
+          .string()
+          .optional()
+          .nullable(),
       })
       .strict()
       .optional()
       .nullable(),
+
     maxPremium: z
       .object({
-        value: z.string().optional().nullable(),
-        currency: z.string().optional().nullable(),
-        evidence: z.string().optional().nullable(),
+        value: z
+          .string()
+          .optional()
+          .nullable(),
+
+        currency: z
+          .string()
+          .optional()
+          .nullable(),
+
+        evidence: z
+          .string()
+          .optional()
+          .nullable(),
       })
       .strict()
       .optional()
       .nullable(),
+
     horizon: z
       .object({
-        rawText: z.string().optional().nullable(),
-        evidence: z.string().optional().nullable(),
+        rawText: z
+          .string()
+          .optional()
+          .nullable(),
+
+        evidence: z
+          .string()
+          .optional()
+          .nullable(),
       })
       .strict()
       .optional()
       .nullable(),
+
     allowMultiLeg: z
       .object({
-        value: z.boolean().optional().nullable(),
-        evidence: z.string().optional().nullable(),
+        value: z
+          .boolean()
+          .optional()
+          .nullable(),
+
+        evidence: z
+          .string()
+          .optional()
+          .nullable(),
       })
       .strict()
       .optional()
       .nullable(),
-    ambiguities: z.array(z.string()).optional().nullable(),
-    clarificationQuestions: z.array(z.string()).optional().nullable(),
+
+    ambiguities: z
+      .array(z.string())
+      .optional()
+      .nullable(),
+
+    clarificationQuestions: z
+      .array(z.string())
+      .optional()
+      .nullable(),
   })
   .strict();
 
@@ -100,36 +177,70 @@ export interface ValidationAndNormalizationResult {
 }
 
 export class LLMOutputValidator {
-  /**
-   * Sanitizes, validates, and normalizes untrusted LLM extraction output into a safe ParsedRiskIntentDraft.
-   * STRICT SECURITY BOUNDARIES:
-   * 1. REJECTS any output containing forbidden authority/control fields.
-   * 2. REJECTS unknown top-level schema fields.
-   * 3. Validates exposure units and budget currencies.
-   * 4. Enforces grounded evidence provenance.
-   * 5. Enforces immutable server-owned confirmedByUser = false.
-   */
   public static validateAndNormalize(
     rawOutput: unknown,
     originalPromptText: string,
     providerMetadata?: LLMProviderMetadata
   ): ValidationAndNormalizationResult {
     const nowMs = Date.now();
+
+    const prompt =
+      typeof originalPromptText ===
+        "string"
+        ? originalPromptText.trim()
+        : "";
+
     const missingFields: string[] = [];
     const ambiguitiesFound: string[] = [];
-    let requiresClarification = false;
-    let unsupportedObjective = false;
-    let unsupportedObjectiveReason: string | undefined = undefined;
 
-    // 1. Structural parse and strict authority check
-    if (!rawOutput || typeof rawOutput !== "object") {
-      throw new Error("INVALID_PROVIDER_OUTPUT: response must be a JSON object.");
+    const addMissing = (
+      field: string
+    ): void => {
+      if (
+        !missingFields.includes(
+          field
+        )
+      ) {
+        missingFields.push(
+          field
+        );
+      }
+    };
+
+    const addAmbiguity = (
+      message: string
+    ): void => {
+      if (
+        !ambiguitiesFound.includes(
+          message
+        )
+      ) {
+        ambiguitiesFound.push(
+          message
+        );
+      }
+    };
+
+    if (
+      !rawOutput ||
+      typeof rawOutput !==
+      "object"
+    ) {
+      throw new Error(
+        "INVALID_PROVIDER_OUTPUT: response must be a JSON object."
+      );
     }
 
-    const rawObj = rawOutput as Record<string, any>;
+    const rawObj =
+      rawOutput as Record<
+        string,
+        any
+      >;
 
-    // Security Check: Explicitly REJECT output if authority fields are present
-    for (const field of FORBIDDEN_AUTHORITY_FIELDS) {
+    for (
+      const field of
+      FORBIDDEN_AUTHORITY_FIELDS
+    ) {
       if (field in rawObj) {
         throw new Error(
           `INVALID_PROVIDER_OUTPUT: Forbidden authority/control field '${field}' detected in model output.`
@@ -137,334 +248,1066 @@ export class LLMOutputValidator {
       }
     }
 
-    const parseResult = LLMIntentExtractionDTOSchema.safeParse(rawObj);
+    const parseResult =
+      LLMIntentExtractionDTOSchema.safeParse(
+        rawObj
+      );
+
     if (!parseResult.success) {
-      throw new Error(`INVALID_PROVIDER_OUTPUT: Schema validation failed: ${parseResult.error.message}`);
+      throw new Error(
+        `INVALID_PROVIDER_OUTPUT: Schema validation failed: ${parseResult.error.message}`
+      );
     }
 
-    const dto = parseResult.data;
+    const dto =
+      parseResult.data;
 
-    // 2. Check Objective Scope
-    const rawObjective = (dto.objective || "").trim().toUpperCase();
-    const isSpeculationOrYield =
-      rawObjective === "UNSUPPORTED_OBJECTIVE" ||
-      rawObjective === "SPECULATION" ||
-      rawObjective === "VOLATILITY_YIELD" ||
-      rawObjective === "YIELD" ||
-      rawObjective === "LEVERAGE" ||
-      rawObjective === "ARBITRAGE" ||
-      Boolean(dto.unsupportedObjectiveReason) ||
-      /\b(speculate|speculation|yield|rally|moon|long call|arbitrage|leverage|trading bot)\b/i.test(originalPromptText);
+    const rawObjective =
+      String(
+        dto.objective || ""
+      )
+        .trim()
+        .toUpperCase();
 
-    if (isSpeculationOrYield && rawObjective !== "DOWNSIDE_PROTECTION") {
-      unsupportedObjective = true;
-      unsupportedObjectiveReason =
-        dto.unsupportedObjectiveReason ||
-        "HedgeOS currently supports Downside Protection intents only. Speculation, yield generation, and trading bot strategies are not supported in this MVP.";
-      requiresClarification = true;
-    }
+    const promptShowsUnsupportedIntent =
+      /\b(speculate|speculation|yield farming|yield generation|arbitrage|leverage|leveraged|trading bot|naked call|short call|10x)\b/i.test(
+        prompt
+      );
 
-    const objectiveField: FieldProvenance<RiskObjective> = {
-      value: "DOWNSIDE_PROTECTION",
-      source: "SYSTEM_DEFAULT",
-      confidence: 1.0,
-      requiresConfirmation: false,
+    const modelExplicitlyUnsupported =
+      rawObjective ===
+      "UNSUPPORTED_OBJECTIVE" ||
+      rawObjective ===
+      "SPECULATION" ||
+      rawObjective ===
+      "VOLATILITY_YIELD" ||
+      rawObjective ===
+      "YIELD" ||
+      rawObjective ===
+      "LEVERAGE" ||
+      rawObjective ===
+      "ARBITRAGE";
+
+    const unsupportedObjective =
+      promptShowsUnsupportedIntent ||
+      modelExplicitlyUnsupported;
+
+    const unsupportedObjectiveReason =
+      unsupportedObjective
+        ? dto
+          .unsupportedObjectiveReason ||
+        "HedgeOS currently supports Downside Protection only. Speculation, yield generation, leverage, arbitrage, and autonomous trading strategies are outside this MVP."
+        : undefined;
+
+    const objectiveField:
+      FieldProvenance<RiskObjective> =
+    {
+      value:
+        "DOWNSIDE_PROTECTION",
+
+      source:
+        "SYSTEM_DEFAULT",
+
+      confidence: 1,
+
+      requiresConfirmation:
+        false,
     };
 
-    // 3. Asset Extraction & Evidence Grounding
-    let assetField: FieldProvenance<string> | null = null;
-    const rawAsset = dto.asset?.value?.trim().toUpperCase();
+    let assetField:
+      FieldProvenance<string> | null =
+      null;
 
-    if (rawAsset && (rawAsset === "ETH" || rawAsset === "WETH" || rawAsset === "BTC" || rawAsset === "CBBTC" || rawAsset === "SOL")) {
-      const evidence = dto.asset?.evidence || "";
-      // Strong evidence grounding: check word boundaries in user text
-      const isGrounded = evidence
-        ? originalPromptText.toLowerCase().includes(evidence.toLowerCase())
-        : new RegExp(`\\b${rawAsset}\\b`, "i").test(originalPromptText);
+    const modelAsset =
+      dto.asset?.value
+        ?.trim()
+        .toUpperCase();
 
-      assetField = {
-        value: rawAsset,
-        source: isGrounded ? "USER_EXPLICIT" : "AI_INFERRED",
-        confidence: isGrounded ? 1.0 : 0.7,
-        requiresConfirmation: !isGrounded,
-        originalPhrase: isGrounded ? (evidence || rawAsset) : undefined,
-      };
-      if (!isGrounded) {
-        requiresClarification = true;
-      }
-    } else {
-      missingFields.push("asset");
-      requiresClarification = true;
-    }
+    if (modelAsset) {
+      const canonicalAsset =
+        this.canonicalAsset(
+          modelAsset
+        );
 
-    // 4. Exposure Amount & Unit Validation
-    let exposureAmountField: FieldProvenance<TokenAmount> | null = null;
-    const rawExposureStr = dto.exposureAmount?.value ? String(dto.exposureAmount.value).trim() : null;
-    const rawUnit = dto.exposureAmount?.unit ? String(dto.exposureAmount.unit).trim().toUpperCase() : null;
+      if (!canonicalAsset) {
+        addMissing("asset");
 
-    if (rawExposureStr && assetField?.value) {
-      const numVal = parseFloat(rawExposureStr);
-      if (isNaN(numVal) || numVal <= 0 || !Number.isFinite(numVal)) {
-        ambiguitiesFound.push(`Invalid exposure amount '${rawExposureStr}': must be a positive number.`);
-        missingFields.push("exposureAmount");
-        requiresClarification = true;
+        addAmbiguity(
+          `Unsupported or unrecognized asset '${modelAsset}'. Current verified HedgeOS protection path supports ETH/WETH and BTC/cbBTC.`
+        );
       } else {
-        // Unit check: unit must match normalized exposure asset
-        const normalizedAsset = assetField.value;
-        const isValidUnit =
-          !rawUnit ||
-          (normalizedAsset === "ETH" && (rawUnit === "ETH" || rawUnit === "WETH")) ||
-          (normalizedAsset === "WETH" && (rawUnit === "ETH" || rawUnit === "WETH")) ||
-          (normalizedAsset === "BTC" && (rawUnit === "BTC" || rawUnit === "CBBTC")) ||
-          (normalizedAsset === "CBBTC" && (rawUnit === "BTC" || rawUnit === "CBBTC")) ||
-          (normalizedAsset === "SOL" && rawUnit === "SOL");
-
-        if (!isValidUnit) {
-          ambiguitiesFound.push(
-            `Inconsistent exposure unit: asset is ${normalizedAsset} but exposure unit was specified as ${rawUnit}.`
+        const groundedPhrase =
+          this.findAssetPhrase(
+            prompt,
+            canonicalAsset
           );
-          missingFields.push("exposureAmount");
-          requiresClarification = true;
-        } else {
-          const decimals = normalizedAsset === "ETH" || normalizedAsset === "WETH" ? 18 : normalizedAsset === "BTC" || normalizedAsset === "CBBTC" ? 8 : 18;
-          try {
-            const parsedAmount = parseExactDecimal(rawExposureStr, decimals, normalizedAsset);
-            const evidence = dto.exposureAmount?.evidence || "";
-            const isGrounded = evidence
-              ? originalPromptText.toLowerCase().includes(evidence.toLowerCase())
-              : originalPromptText.includes(rawExposureStr);
 
-            exposureAmountField = {
-              value: parsedAmount,
-              source: isGrounded ? "USER_EXPLICIT" : "AI_INFERRED",
-              confidence: isGrounded ? 1.0 : 0.7,
-              requiresConfirmation: !isGrounded,
-              originalPhrase: isGrounded ? (evidence || rawExposureStr) : undefined,
-            };
-            if (!isGrounded) {
-              requiresClarification = true;
-            }
-          } catch {
-            missingFields.push("exposureAmount");
-            requiresClarification = true;
-          }
-        }
-      }
-    } else {
-      missingFields.push("exposureAmount");
-      requiresClarification = true;
-    }
+        if (!groundedPhrase) {
+          addMissing("asset");
 
-    // 5. Target Max Loss Percent Validation
-    let targetMaxLossField: FieldProvenance<number> | null = null;
-    const rawLoss = dto.targetMaxLossPercent?.value;
-
-    if (rawLoss !== undefined && rawLoss !== null && String(rawLoss).trim() !== "") {
-      const parsedLoss = typeof rawLoss === "number" ? rawLoss : parseFloat(String(rawLoss).replace("%", "").trim());
-      if (isNaN(parsedLoss) || parsedLoss <= 0 || parsedLoss > 100 || !Number.isFinite(parsedLoss)) {
-        ambiguitiesFound.push(`Invalid max loss percentage '${rawLoss}': must be between 0.1% and 100%.`);
-        missingFields.push("targetMaxLossPercent");
-        requiresClarification = true;
-      } else {
-        const evidence = dto.targetMaxLossPercent?.evidence || "";
-        const isGrounded = evidence
-          ? originalPromptText.toLowerCase().includes(evidence.toLowerCase())
-          : originalPromptText.includes(String(rawLoss));
-
-        targetMaxLossField = {
-          value: parsedLoss,
-          source: isGrounded ? "USER_EXPLICIT" : "AI_INFERRED",
-          confidence: isGrounded ? 1.0 : 0.7,
-          requiresConfirmation: !isGrounded,
-          originalPhrase: isGrounded ? (evidence || `${parsedLoss}%`) : undefined,
-        };
-        if (!isGrounded) {
-          requiresClarification = true;
-        }
-      }
-    } else {
-      missingFields.push("targetMaxLossPercent");
-      requiresClarification = true;
-    }
-
-    // 6. Max Premium Budget & Currency Validation
-    let maxPremiumField: FieldProvenance<TokenAmount> | null = null;
-    const rawBudgetStr = dto.maxPremium?.value ? String(dto.maxPremium.value).trim() : null;
-    const rawCurrency = dto.maxPremium?.currency ? String(dto.maxPremium.currency).trim().toUpperCase() : null;
-
-    if (rawBudgetStr !== null && rawBudgetStr !== "") {
-      const numBudget = parseFloat(rawBudgetStr);
-      if (isNaN(numBudget) || numBudget < 0 || !Number.isFinite(numBudget)) {
-        ambiguitiesFound.push(`Invalid premium budget '${rawBudgetStr}': must be zero or a positive amount.`);
-        missingFields.push("maxPremiumUSDC");
-        requiresClarification = true;
-      } else {
-        // Currency validation: Must be USDC for current HedgeOS MVP
-        const isUsdcCurrency = rawCurrency === "USDC" || (!rawCurrency && /\bUSDC\b/i.test(originalPromptText));
-        if (rawCurrency && rawCurrency !== "USDC") {
-          ambiguitiesFound.push(
-            `Unsupported budget currency '${rawCurrency}': HedgeOS requires protection budget in USDC.`
+          addAmbiguity(
+            `The model suggested ${canonicalAsset}, but that asset is not explicitly grounded in the user's text.`
           );
-          missingFields.push("maxPremiumUSDC");
-          requiresClarification = true;
-        } else if (!isUsdcCurrency) {
-          ambiguitiesFound.push("Budget currency is unspecified. Please confirm budget amount in USDC.");
-          missingFields.push("maxPremiumUSDC");
-          requiresClarification = true;
         } else {
-          try {
-            const parsedBudget = parseExactDecimal(rawBudgetStr, 6, "USDC");
-            const evidence = dto.maxPremium?.evidence || "";
-            const isGrounded = evidence
-              ? originalPromptText.toLowerCase().includes(evidence.toLowerCase())
-              : originalPromptText.includes(rawBudgetStr);
+          assetField = {
+            value:
+              canonicalAsset,
 
-            maxPremiumField = {
-              value: parsedBudget,
-              source: isGrounded ? "USER_EXPLICIT" : "AI_INFERRED",
-              confidence: isGrounded ? 1.0 : 0.7,
-              requiresConfirmation: !isGrounded,
-              originalPhrase: isGrounded ? (evidence || `${rawBudgetStr} USDC`) : undefined,
-            };
-            if (!isGrounded) {
-              requiresClarification = true;
-            }
-          } catch {
-            missingFields.push("maxPremiumUSDC");
-            requiresClarification = true;
-          }
-        }
-      }
-    } else {
-      missingFields.push("maxPremiumUSDC");
-      requiresClarification = true;
-    }
+            source:
+              "USER_EXPLICIT",
 
-    // 7. Deterministic Protection Horizon Resolution & Grounding
-    let horizonField: FieldProvenance<HorizonTarget> | null = null;
-    const rawHorizonText = dto.horizon?.rawText ? String(dto.horizon.rawText).trim() : null;
+            confidence: 1,
 
-    if (rawHorizonText) {
-      const isoMatch = rawHorizonText.match(/\b(\d{4}-\d{2}-\d{2})\b/);
-      const isFriday = rawHorizonText.toLowerCase().includes("friday");
+            requiresConfirmation:
+              false,
 
-      if (isoMatch) {
-        try {
-          const parsedHorizon = parseIsoDateMYT(isoMatch[1]);
-          if (parsedHorizon.timestampMs <= nowMs) {
-            ambiguitiesFound.push(`Requested horizon date (${isoMatch[1]}) is in the past. Future horizon date required.`);
-            missingFields.push("horizonTimestamp");
-            requiresClarification = true;
-          } else {
-            const isGrounded = originalPromptText.includes(isoMatch[1]);
-            horizonField = {
-              value: parsedHorizon,
-              source: isGrounded ? "USER_EXPLICIT" : "AI_INFERRED",
-              confidence: isGrounded ? 1.0 : 0.7,
-              requiresConfirmation: !isGrounded,
-              originalPhrase: isGrounded ? isoMatch[0] : undefined,
-            };
-          }
-        } catch (dateErr: any) {
-          ambiguitiesFound.push(`Invalid calendar date '${isoMatch[1]}': ${dateErr.message}`);
-          missingFields.push("horizonTimestamp");
-          requiresClarification = true;
-        }
-      } else if (isFriday) {
-        const isGrounded = /\bfriday\b/i.test(originalPromptText);
-        if (!isGrounded) {
-          ambiguitiesFound.push("Protection horizon is unspecified. Please confirm your protection horizon.");
-          missingFields.push("horizonTimestamp");
-          requiresClarification = true;
-        } else {
-          const fridayHorizon = getNextFridayMYT(nowMs);
-          horizonField = {
-            value: fridayHorizon,
-            source: "USER_EXPLICIT",
-            confidence: 0.95,
-            requiresConfirmation: false,
-            originalPhrase: "until Friday",
+            originalPhrase:
+              groundedPhrase,
+
+            rawUserInput:
+              prompt,
           };
         }
-      } else if (/\b(soon|later|next month|someday|eventually|in the future)\b/i.test(rawHorizonText)) {
-        ambiguitiesFound.push(`Protection horizon '${rawHorizonText}' is ambiguous. Please select an exact calendar date or Friday.`);
-        missingFields.push("horizonTimestamp");
-        requiresClarification = true;
-      } else {
-        ambiguitiesFound.push(`Unrecognized horizon expression '${rawHorizonText}'. Please specify an explicit calendar date (YYYY-MM-DD) or Friday.`);
-        missingFields.push("horizonTimestamp");
-        requiresClarification = true;
       }
     } else {
-      missingFields.push("horizonTimestamp");
-      requiresClarification = true;
+      addMissing("asset");
     }
 
-    // 8. Multi-Leg Permission Grounding (Strictly require grounded phrase in original text)
-    const hasGroundedSpreadPhrase = /\b(spread|put spread|multi-leg|vertical spread)\b/i.test(originalPromptText);
-    const modelClaimedMultiLeg = dto.allowMultiLeg?.value === true;
-    const isMultiLegGranted = modelClaimedMultiLeg && hasGroundedSpreadPhrase;
+    let exposureAmountField:
+      FieldProvenance<TokenAmount> | null =
+      null;
 
-    const multiLegField: FieldProvenance<boolean> = {
-      value: isMultiLegGranted,
-      source: isMultiLegGranted ? "USER_EXPLICIT" : "SYSTEM_DEFAULT",
-      confidence: 1.0,
-      requiresConfirmation: false,
-      originalPhrase: isMultiLegGranted ? (dto.allowMultiLeg?.evidence || "spread") : undefined,
+    const rawExposure =
+      dto.exposureAmount?.value !==
+        undefined &&
+        dto.exposureAmount?.value !==
+        null
+        ? String(
+          dto.exposureAmount.value
+        ).trim()
+        : "";
+
+    const modelExposureUnit =
+      dto.exposureAmount?.unit
+        ? this.canonicalAsset(
+          dto.exposureAmount.unit
+        )
+        : null;
+
+    const modelDeclaredAsset =
+      dto.asset?.value
+        ? this.canonicalAsset(
+          dto.asset.value
+        )
+        : null;
+
+    if (
+      dto.exposureAmount?.unit &&
+      modelDeclaredAsset &&
+      modelExposureUnit !== modelDeclaredAsset
+    ) {
+      addAmbiguity(
+        `Inconsistent exposure unit '${dto.exposureAmount.unit}' for asset '${dto.asset?.value}'.`
+      );
+    }
+
+    if (
+      rawExposure &&
+      assetField
+    ) {
+      const groundedAsset =
+        this.canonicalAsset(
+          assetField.value
+        );
+
+      if (!groundedAsset) {
+        addMissing(
+          "exposureAmount"
+        );
+
+        addAmbiguity(
+          "Exposure asset could not be normalized to a supported asset."
+        );
+      } else {
+        const declaredUnit =
+          dto.exposureAmount?.unit
+            ? this.canonicalAsset(
+              dto.exposureAmount.unit
+            )
+            : null;
+
+        if (
+          dto.exposureAmount?.unit &&
+          declaredUnit !== groundedAsset
+        ) {
+          addMissing(
+            "exposureAmount"
+          );
+
+          addAmbiguity(
+            `Inconsistent exposure unit '${dto.exposureAmount.unit}' for asset '${groundedAsset}'.`
+          );
+        } else {
+        const decimals =
+          groundedAsset === "BTC"
+            ? 8
+            : 18;
+
+        try {
+          const parsedExposure =
+            parseExactDecimal(
+              rawExposure,
+              decimals,
+              groundedAsset
+            );
+
+          if (
+            BigInt(
+              parsedExposure
+                .amountBaseUnits
+            ) <= 0n
+          ) {
+            throw new Error(
+              "Exposure must be positive"
+            );
+          }
+
+          const groundedPhrase =
+            this.findExactExposurePhrase(
+              prompt,
+              parsedExposure,
+              groundedAsset
+            );
+
+          if (!groundedPhrase) {
+            addMissing(
+              "exposureAmount"
+            );
+
+            addAmbiguity(
+              `The model suggested exposure '${rawExposure} ${groundedAsset}', but that exact quantity is not grounded in the user's text.`
+            );
+          } else {
+            exposureAmountField = {
+              value:
+                parsedExposure,
+
+              source:
+                "USER_EXPLICIT",
+
+              confidence: 1,
+
+              requiresConfirmation:
+                false,
+
+              originalPhrase:
+                groundedPhrase,
+
+              rawUserInput:
+                prompt,
+            };
+          }
+        } catch {
+          addMissing(
+            "exposureAmount"
+          );
+
+          addAmbiguity(
+            `Invalid exposure amount '${rawExposure}'. A positive exactly representable quantity is required.`
+          );
+        }
+        }
+      }
+    } else {
+      addMissing(
+        "exposureAmount"
+      );
+    }
+
+    let targetMaxLossField:
+      FieldProvenance<number> | null =
+      null;
+
+    const rawLoss =
+      dto.targetMaxLossPercent
+        ?.value;
+
+    if (
+      rawLoss !==
+      undefined &&
+      rawLoss !== null &&
+      String(rawLoss).trim() !==
+      ""
+    ) {
+      const normalizedLoss =
+        String(rawLoss)
+          .replace("%", "")
+          .trim();
+
+      const parsedLoss =
+        Number(
+          normalizedLoss
+        );
+
+      if (
+        !Number.isFinite(
+          parsedLoss
+        ) ||
+        parsedLoss <= 0 ||
+        parsedLoss > 100
+      ) {
+        addMissing(
+          "targetMaxLossPercent"
+        );
+
+        addAmbiguity(
+          `Invalid maximum loss percentage '${String(
+            rawLoss
+          )}'. Enter a value greater than 0% and no more than 100%.`
+        );
+      } else {
+        const groundedPhrase =
+          this.findExactLossPhrase(
+            prompt,
+            parsedLoss
+          );
+
+        if (!groundedPhrase) {
+          addMissing(
+            "targetMaxLossPercent"
+          );
+
+          addAmbiguity(
+            `The model suggested a ${parsedLoss}% maximum loss, but that exact percentage is not explicitly grounded in the user's text.`
+          );
+        } else {
+          targetMaxLossField = {
+            value:
+              parsedLoss,
+
+            source:
+              "USER_EXPLICIT",
+
+            confidence: 1,
+
+            requiresConfirmation:
+              false,
+
+            originalPhrase:
+              groundedPhrase,
+
+            rawUserInput:
+              prompt,
+          };
+        }
+      }
+    } else {
+      addMissing(
+        "targetMaxLossPercent"
+      );
+    }
+
+    let maxPremiumField:
+      FieldProvenance<TokenAmount> | null =
+      null;
+
+    const rawBudget =
+      dto.maxPremium?.value !==
+        undefined &&
+        dto.maxPremium?.value !==
+        null
+        ? String(
+          dto.maxPremium.value
+        ).trim()
+        : "";
+
+    const rawCurrency =
+      dto.maxPremium?.currency
+        ?.trim()
+        .toUpperCase();
+
+    if (rawBudget) {
+      if (
+        rawCurrency &&
+        rawCurrency !==
+        "USDC"
+      ) {
+        addMissing(
+          "maxPremiumUSDC"
+        );
+
+        addAmbiguity(
+          `Unsupported budget currency '${rawCurrency}'. The current HedgeOS execution path requires a USDC protection budget.`
+        );
+      } else {
+        try {
+          const parsedBudget =
+            parseExactDecimal(
+              rawBudget,
+              6,
+              "USDC"
+            );
+
+          if (
+            BigInt(
+              parsedBudget
+                .amountBaseUnits
+            ) < 0n
+          ) {
+            throw new Error(
+              "Negative budget"
+            );
+          }
+
+          const groundedPhrase =
+            this.findExactBudgetPhrase(
+              prompt,
+              parsedBudget
+            );
+
+          if (!groundedPhrase) {
+            addMissing(
+              "maxPremiumUSDC"
+            );
+
+            addAmbiguity(
+              `The model suggested a ${rawBudget} USDC protection budget, but that exact budget is not explicitly grounded in the user's text.`
+            );
+          } else {
+            maxPremiumField = {
+              value:
+                parsedBudget,
+
+              source:
+                "USER_EXPLICIT",
+
+              confidence: 1,
+
+              requiresConfirmation:
+                false,
+
+              originalPhrase:
+                groundedPhrase,
+
+              rawUserInput:
+                prompt,
+            };
+          }
+        } catch {
+          addMissing(
+            "maxPremiumUSDC"
+          );
+
+          addAmbiguity(
+            `Invalid premium budget '${rawBudget}'. The budget must be a non-negative USDC amount.`
+          );
+        }
+      }
+    } else {
+      addMissing(
+        "maxPremiumUSDC"
+      );
+    }
+
+    let horizonField:
+      FieldProvenance<HorizonTarget> | null =
+      null;
+
+    const horizonResult =
+      this.resolveGroundedHorizon(
+        prompt,
+        nowMs
+      );
+
+    if (horizonResult) {
+      if (
+        horizonResult.value
+          .timestampMs <= nowMs
+      ) {
+        addMissing(
+          "horizonTimestamp"
+        );
+
+        addAmbiguity(
+          "Protection horizon must resolve to a future timestamp."
+        );
+      } else {
+        horizonField =
+          horizonResult;
+      }
+    } else {
+      addMissing(
+        "horizonTimestamp"
+      );
+
+      if (
+        dto.horizon?.rawText
+      ) {
+        addAmbiguity(
+          `The model suggested horizon '${dto.horizon.rawText}', but HedgeOS could not independently ground and resolve that horizon from the user's text.`
+        );
+      }
+    }
+
+    const groundedSpreadPhrase =
+      prompt.match(
+        /\b(?:allow\s+(?:a\s+)?put\s+spread|allow\s+put\s+spreads?|allow\s+multi-leg|use\s+(?:a\s+)?put\s+spread|put\s+spread\s+is\s+(?:okay|ok)|multi-leg\s+is\s+(?:okay|ok))\b/i
+      );
+
+    const multiLegGranted =
+      Boolean(
+        groundedSpreadPhrase
+      );
+
+    const multiLegField:
+      FieldProvenance<boolean> =
+    {
+      value:
+        multiLegGranted,
+
+      source:
+        multiLegGranted
+          ? "USER_EXPLICIT"
+          : "SYSTEM_DEFAULT",
+
+      confidence: 1,
+
+      requiresConfirmation:
+        false,
+
+      originalPhrase:
+        groundedSpreadPhrase?.[0],
+
+      rawUserInput:
+        multiLegGranted
+          ? prompt
+          : undefined,
     };
 
-    // 9. Additional Ambiguities from DTO
-    if (dto.ambiguities && Array.isArray(dto.ambiguities)) {
-      for (const amb of dto.ambiguities) {
-        if (amb && !ambiguitiesFound.includes(amb)) {
-          ambiguitiesFound.push(amb);
-          requiresClarification = true;
+    if (
+      Array.isArray(
+        dto.ambiguities
+      )
+    ) {
+      for (
+        const ambiguity of
+        dto.ambiguities
+      ) {
+        if (
+          typeof ambiguity ===
+          "string" &&
+          ambiguity.trim()
+        ) {
+          addAmbiguity(
+            ambiguity.trim()
+          );
         }
       }
     }
 
-    // Map string ambiguities to AmbiguityResolution objects for consistent draft storage
-    const ambiguitiesList: AmbiguityResolution[] = ambiguitiesFound.map((amb, idx) => ({
-      field: missingFields[idx] || "general",
-      detectedText: amb,
-      reason: amb,
-      suggestedValue: undefined,
-    }));
+    const ambiguitiesList:
+      AmbiguityResolution[] =
+      ambiguitiesFound.map(
+        (reason) => ({
+          field:
+            this.inferAmbiguityField(
+              reason
+            ),
 
-    // Build immutable candidate draft
-    const candidateDraft: ParsedRiskIntentDraft = {
-      intentId: `intent-${Math.random().toString(36).substring(2, 9)}`,
+          detectedText: "",
+
+          reason,
+
+          suggestedValue:
+            undefined,
+        })
+      );
+
+    const requiresClarification =
+      unsupportedObjective ||
+      missingFields.length > 0 ||
+      ambiguitiesFound.length > 0 ||
+      Boolean(
+        horizonField
+          ?.requiresConfirmation
+      );
+
+    const candidateDraft:
+      ParsedRiskIntentDraft =
+    {
+      intentId:
+        `intent-${Math.random()
+          .toString(36)
+          .substring(2, 9)}`,
+
       version: 1,
-      createdAtMs: nowMs,
-      updatedAtMs: nowMs,
-      confirmedByUser: false, // IMMUTABLE SERVER-OWNED INVARIANT
-      objective: objectiveField,
-      asset: assetField,
-      exposureAmount: exposureAmountField,
-      targetMaxLossPercent: targetMaxLossField,
-      maxPremiumUSDC: maxPremiumField,
-      horizonTimestamp: horizonField,
+
+      createdAtMs:
+        nowMs,
+
+      updatedAtMs:
+        nowMs,
+
+      confirmedByUser:
+        false,
+
+      objective:
+        objectiveField,
+
+      asset:
+        assetField,
+
+      exposureAmount:
+        exposureAmountField,
+
+      targetMaxLossPercent:
+        targetMaxLossField,
+
+      maxPremiumUSDC:
+        maxPremiumField,
+
+      horizonTimestamp:
+        horizonField,
+
       allowedProtocols: {
-        value: ["THETANUTS"],
-        source: "SYSTEM_DEFAULT",
-        confidence: 1.0,
-        requiresConfirmation: false,
+        value: [
+          "THETANUTS",
+        ],
+
+        source:
+          "SYSTEM_DEFAULT",
+
+        confidence: 1,
+
+        requiresConfirmation:
+          false,
       },
-      allowMultiLeg: multiLegField,
+
+      allowMultiLeg:
+        multiLegField,
+
       missingFields,
-      ambiguitiesFound: ambiguitiesList,
-      requiresClarification: requiresClarification || missingFields.length > 0 || ambiguitiesFound.length > 0,
-      originalPromptText,
+
+      ambiguitiesFound:
+        ambiguitiesList,
+
+      requiresClarification,
+
+      originalPromptText:
+        prompt,
+
       providerMetadata,
     };
 
     return {
       candidateDraft,
+
       missingFields,
+
       ambiguitiesFound,
-      requiresClarification: candidateDraft.requiresClarification || false,
+
+      requiresClarification,
+
       unsupportedObjective,
+
       unsupportedObjectiveReason,
     };
+  }
+
+  private static canonicalAsset(
+    rawAsset: string
+  ): "ETH" | "BTC" | null {
+    const value =
+      rawAsset
+        .trim()
+        .toUpperCase();
+
+    if (
+      value === "ETH" ||
+      value === "WETH"
+    ) {
+      return "ETH";
+    }
+
+    if (
+      value === "BTC" ||
+      value === "CBBTC"
+    ) {
+      return "BTC";
+    }
+
+    return null;
+  }
+
+  private static findAssetPhrase(
+    prompt: string,
+    asset: "ETH" | "BTC"
+  ): string | undefined {
+    const regex =
+      asset === "ETH"
+        ? /\b(?:ETH|WETH)\b/i
+        : /\b(?:BTC|CBBTC)\b/i;
+
+    return prompt.match(
+      regex
+    )?.[0];
+  }
+
+  private static findExactExposurePhrase(
+    prompt: string,
+    expected: TokenAmount,
+    asset: "ETH" | "BTC"
+  ): string | undefined {
+    const regex =
+      asset === "ETH"
+        ? /(-?\d+(?:\.\d+)?)\s*(ETH|WETH)\b/gi
+        : /(-?\d+(?:\.\d+)?)\s*(BTC|CBBTC)\b/gi;
+
+    for (
+      const match of
+      prompt.matchAll(regex)
+    ) {
+      try {
+        const parsed =
+          parseExactDecimal(
+            match[1],
+            expected.decimals,
+            expected.symbol
+          );
+
+        if (
+          BigInt(
+            parsed.amountBaseUnits
+          ) ===
+          BigInt(
+            expected.amountBaseUnits
+          )
+        ) {
+          return match[0];
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    return undefined;
+  }
+
+  private static findExactLossPhrase(
+    prompt: string,
+    expectedPercent: number
+  ): string | undefined {
+    const regex =
+      /(-?\d+(?:\.\d+)?)\s*(%|percent\b|pct\b)/gi;
+
+    for (
+      const match of
+      prompt.matchAll(regex)
+    ) {
+      const value =
+        Number(match[1]);
+
+      if (
+        Number.isFinite(value) &&
+        value === expectedPercent
+      ) {
+        return match[0];
+      }
+    }
+
+    return undefined;
+  }
+
+  private static findExactBudgetPhrase(
+    prompt: string,
+    expected: TokenAmount
+  ): string | undefined {
+    const regex =
+      /(-?\d+(?:\.\d+)?)\s*USDC\b/gi;
+
+    for (
+      const match of
+      prompt.matchAll(regex)
+    ) {
+      try {
+        const parsed =
+          parseExactDecimal(
+            match[1],
+            6,
+            "USDC"
+          );
+
+        if (
+          BigInt(
+            parsed.amountBaseUnits
+          ) ===
+          BigInt(
+            expected.amountBaseUnits
+          )
+        ) {
+          return match[0];
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    return undefined;
+  }
+
+  private static resolveGroundedHorizon(
+    prompt: string,
+    nowMs: number
+  ):
+    | FieldProvenance<HorizonTarget>
+    | null {
+    const isoMatch =
+      prompt.match(
+        /\b(\d{4}-\d{2}-\d{2})\b/
+      );
+
+    if (isoMatch) {
+      try {
+        const value =
+          parseIsoDateMYT(
+            isoMatch[1]
+          );
+
+        return {
+          value,
+
+          source:
+            "USER_EXPLICIT",
+
+          confidence: 1,
+
+          requiresConfirmation:
+            false,
+
+          originalPhrase:
+            isoMatch[0],
+
+          rawUserInput:
+            prompt,
+        };
+      } catch {
+        return null;
+      }
+    }
+
+    const daysMatch =
+      prompt.match(
+        /\b(?:for|in)\s+(\d+)\s+days?\b/i
+      );
+
+    if (daysMatch) {
+      const days =
+        Number(
+          daysMatch[1]
+        );
+
+      if (
+        Number.isInteger(days) &&
+        days > 0
+      ) {
+        return {
+          value:
+            formatCustomHorizon(
+              nowMs +
+              days *
+              ONE_DAY_MS
+            ),
+
+          source:
+            "PARSER_INFERRED",
+
+          confidence: 0.95,
+
+          requiresConfirmation:
+            true,
+
+          originalPhrase:
+            daysMatch[0],
+
+          rawUserInput:
+            prompt,
+        };
+      }
+    }
+
+    const nextWeekMatch =
+      prompt.match(
+        /\bnext\s+week\b/i
+      );
+
+    if (nextWeekMatch) {
+      const nextFriday =
+        getNextFridayMYT(
+          nowMs
+        );
+
+      return {
+        value:
+          formatCustomHorizon(
+            nextFriday
+              .timestampMs +
+            7 *
+            ONE_DAY_MS
+          ),
+
+        source:
+          "PARSER_INFERRED",
+
+        confidence: 0.9,
+
+        requiresConfirmation:
+          true,
+
+        originalPhrase:
+          nextWeekMatch[0],
+
+        rawUserInput:
+          prompt,
+      };
+    }
+
+    const thisWeekMatch =
+      prompt.match(
+        /\bthis\s+week\b/i
+      );
+
+    if (thisWeekMatch) {
+      return {
+        value:
+          getNextFridayMYT(
+            nowMs
+          ),
+
+        source:
+          "PARSER_INFERRED",
+
+        confidence: 0.9,
+
+        requiresConfirmation:
+          true,
+
+        originalPhrase:
+          thisWeekMatch[0],
+
+        rawUserInput:
+          prompt,
+      };
+    }
+
+    const weekendMatch =
+      prompt.match(
+        /\b(?:this\s+)?weekend\b/i
+      );
+
+    if (weekendMatch) {
+      return {
+        value:
+          getNextFridayMYT(
+            nowMs
+          ),
+
+        source:
+          "PARSER_INFERRED",
+
+        confidence: 0.9,
+
+        requiresConfirmation:
+          true,
+
+        originalPhrase:
+          weekendMatch[0],
+
+        rawUserInput:
+          prompt,
+      };
+    }
+
+    const fridayMatch =
+      prompt.match(
+        /\b(?:until|through|by)?\s*friday\b/i
+      );
+
+    if (fridayMatch) {
+      return {
+        value:
+          getNextFridayMYT(
+            nowMs
+          ),
+
+        source:
+          "PARSER_INFERRED",
+
+        confidence: 0.95,
+
+        requiresConfirmation:
+          true,
+
+        originalPhrase:
+          fridayMatch[0].trim(),
+
+        rawUserInput:
+          prompt,
+      };
+    }
+
+    return null;
+  }
+
+  private static inferAmbiguityField(
+    reason: string
+  ): string {
+    const lower =
+      reason.toLowerCase();
+
+    if (
+      lower.includes("asset")
+    ) {
+      return "asset";
+    }
+
+    if (
+      lower.includes(
+        "exposure"
+      )
+    ) {
+      return "exposureAmount";
+    }
+
+    if (
+      lower.includes("loss") ||
+      lower.includes(
+        "percentage"
+      )
+    ) {
+      return "targetMaxLossPercent";
+    }
+
+    if (
+      lower.includes(
+        "budget"
+      ) ||
+      lower.includes(
+        "premium"
+      ) ||
+      lower.includes("usdc")
+    ) {
+      return "maxPremiumUSDC";
+    }
+
+    if (
+      lower.includes(
+        "horizon"
+      ) ||
+      lower.includes("date")
+    ) {
+      return "horizonTimestamp";
+    }
+
+    return "intent";
   }
 }

@@ -16,6 +16,12 @@ export const MOCK_OPTION_BOOK_QUOTES: MarketQuote[] = [
     premium: { amountBaseUnits: "2700000", decimals: 6, symbol: "USDC" },
     availableQuantity: { amountBaseUnits: "10000000", decimals: 6, symbol: "CONTRACTS" },
     executableNow: true,
+    allStrikes: [{ amountBaseUnits: "280000000000", decimals: 8, symbol: "USD" }],
+    implementationAddress: "0x7355EB92dfb0503DB558a70c10843618932ab290",
+    implementationName: "PUT",
+    makerIsSeller: true,
+    orderValidityDeadlineMs: Date.now() + 3600_000,
+    eligibilityEvidence: { status: "ELIGIBLE_LONG_PUT", checkedAtMs: Date.now(), checks: [] },
   },
   {
     quoteId: "mock-quote-ob-002",
@@ -28,6 +34,12 @@ export const MOCK_OPTION_BOOK_QUOTES: MarketQuote[] = [
     premium: { amountBaseUnits: "5200000", decimals: 6, symbol: "USDC" },
     availableQuantity: { amountBaseUnits: "5000000", decimals: 6, symbol: "CONTRACTS" },
     executableNow: true,
+    allStrikes: [{ amountBaseUnits: "275000000000", decimals: 8, symbol: "USD" }],
+    implementationAddress: "0x7355EB92dfb0503DB558a70c10843618932ab290",
+    implementationName: "PUT",
+    makerIsSeller: true,
+    orderValidityDeadlineMs: Date.now() + 3600_000,
+    eligibilityEvidence: { status: "ELIGIBLE_LONG_PUT", checkedAtMs: Date.now(), checks: [] },
   },
 ];
 

@@ -107,18 +107,34 @@ export class ThetanutsSimulationService {
         optionRight: proposal.expectedOptionRight,
         strikeBaseUnits:
           proposal.expectedStrike.amountBaseUnits,
+        strikeDecimals:
+          proposal.expectedStrike.decimals,
         expiryTimestampMs:
           proposal.expectedExpiryMs,
         quantityBaseUnits:
           proposal.expectedQuantity.amountBaseUnits,
+        quantityDecimals:
+          proposal.expectedQuantity.decimals,
         expectedTotalCostBaseUnits:
           proposal.expectedTotalCost?.amountBaseUnits,
+        expectedTotalCostDecimals:
+          proposal.expectedTotalCost?.decimals,
         boundQuoteId: proposal.boundQuoteId,
         orderIndex:
           proposal.normalizedParameters?.orderIndex,
         makerAddress:
           proposal.normalizedParameters?.makerAddress,
         feeStatus: proposal.feeStatus,
+        buyerSpendStatus:
+          proposal.buyerSpendStatus,
+        orderSemanticDigest:
+          proposal.normalizedParameters?.orderSemanticDigest,
+        boundCandidateDigest:
+          proposal.boundCandidateDigest,
+        boundMarketSnapshotId:
+          proposal.boundMarketSnapshotId,
+        boundMarketSnapshotDigest:
+          proposal.boundMarketSnapshotDigest,
       });
 
     const isDigestValid =
@@ -593,6 +609,7 @@ export class ThetanutsSimulationService {
       expectedTotalCost:
         simulatedTotalCost,
       feeStatus: simulatedFeeStatus,
+      buyerSpendStatus: proposal.buyerSpendStatus,
       expectedExpiryMs:
         proposal.expectedExpiryMs,
       expectedOptionQuantity:

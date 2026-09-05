@@ -22,7 +22,7 @@ This bundle adds a deterministic bounded authorization attestation that binds:
 - fresh market evidence;
 - simulation verification results.
 
-The attestation is hashed into an immutable digest.
+The attestation is hashed into a deterministic digest so later mutation is detectable.
 
 ## What this deliberately does NOT do
 

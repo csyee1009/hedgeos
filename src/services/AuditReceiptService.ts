@@ -5,6 +5,8 @@ import {
   BoundedAuthorizationAttestation,
   CandidateStrategy,
   ExecutionCommitment,
+  ExecutionPreparation,
+  ExecutionVerificationRecord,
   ExternalHumanAuthorizationHandoff,
   HumanReviewRecord,
   PolicyDecisionRecord,
@@ -94,8 +96,7 @@ export class AuditReceiptService {
           d.overallStatus === "FAIL" ||
           (d as any).overallStatus === "REJECTED" ||
           (d as any).status === "FAIL" ||
-          (d as any).status === "REJECTED" ||
-          d.passedAllInvariants === false
+          (d as any).status === "REJECTED"
       );
       const hasIncomplete = decisionList.some(
         (d) =>
@@ -157,6 +158,54 @@ export class AuditReceiptService {
       receiptId,
       receiptDigest,
     };
+  }
+
+  public static verifyReceipt(receipt: AuditReceipt): boolean {
+    const { receiptId: _id, receiptDigest, ...payload } = receipt;
+    const canonicalPayload = JSON.stringify(canonicalizeValue(payload));
+    return createHash("sha256").update(canonicalPayload).digest("hex") === receiptDigest;
+  }
+
+  public static appendExecutionEvidence(
+    prior: AuditReceipt,
+    preparation: ExecutionPreparation,
+    verification: ExecutionVerificationRecord,
+    createdAtMs = Date.now()
+  ): AuditReceipt {
+    if (!this.verifyReceipt(prior)) throw new Error("Prior audit receipt digest mismatch");
+    const finalExecutionStatus: AuditReceipt["finalExecutionStatus"] =
+      verification.status === "POSITION_CONFIRMED" || verification.status === "EXECUTION_VERIFIED"
+        ? "ON_CHAIN_VERIFIED"
+        : verification.status === "MISMATCH"
+          ? "MISMATCH"
+          : verification.status === "REVERTED"
+            ? "REVERTED"
+            : verification.status === "EXECUTION_OBSERVED" || verification.status === "PENDING_CONFIRMATIONS"
+              ? "EXTERNAL_EXECUTION_OBSERVED"
+              : "INSUFFICIENT_EVIDENCE";
+    const withoutDigest: any = {
+      ...prior,
+      marketSnapshotDigest: preparation.marketSnapshotDigest,
+      candidateDigest: preparation.candidateDigest,
+      exactPreparationId: preparation.preparationId,
+      exactPreparationDigest: preparation.preparationDigest,
+      calldataHash: preparation.transaction.calldataHash,
+      transactionHash: verification.transactionHash,
+      blockNumber: verification.protocolEvent?.blockNumber,
+      blockHash: verification.protocolEvent?.blockHash,
+      protocolLogIndex: verification.protocolEvent?.logIndex,
+      executionVerificationId: verification.verificationId,
+      executionVerificationStatus: verification.status,
+      positionAddress: verification.position?.optionAddress,
+      finalExecutionStatus,
+      createdAtMs,
+    };
+    delete withoutDigest.receiptId;
+    delete withoutDigest.receiptDigest;
+    const receiptDigest = createHash("sha256")
+      .update(JSON.stringify(canonicalizeValue(withoutDigest)))
+      .digest("hex");
+    return { ...withoutDigest, receiptId: `receipt-${receiptDigest.slice(0, 16)}`, receiptDigest } as AuditReceipt;
   }
 }
 

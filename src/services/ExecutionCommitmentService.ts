@@ -3,6 +3,7 @@ import {
   ActionProposal,
   BoundedAuthorizationAttestation,
   ExecutionCommitment,
+  ExecutionPreparation,
   ExecutionCommitmentStatus,
   SimulationResult,
   TokenAmount,
@@ -25,6 +26,51 @@ const normalizeAmount = (
 };
 
 export class ExecutionCommitmentService {
+  public static bindExactPreparedAction(
+    commitment: ExecutionCommitment,
+    preparation: ExecutionPreparation
+  ): ExecutionCommitment {
+    const tx = preparation.transaction;
+    const valid = commitment.status !== "BLOCKED"
+      && commitment.status !== "EXPIRED"
+      && preparation.status === "EXACT_TRANSACTION_PREPARED"
+      && preparation.intentId === commitment.intentId
+      && preparation.intentVersion === commitment.intentVersion
+      && preparation.proposalId === commitment.proposalId
+      && preparation.proposalDigest === commitment.proposalDigest
+      && tx.chainId === commitment.chainId
+      && tx.to.toLowerCase() === commitment.targetContract.toLowerCase()
+      && tx.action === commitment.actionType
+      && tx.validUntilMs > Date.now();
+    if (!valid) return { ...commitment, status: "BLOCKED", canExecute: false, executionStatus: "NOT_AUTHORIZED" };
+    const payload = JSON.stringify({
+      priorCommitmentDigest: commitment.commitmentDigest,
+      exactPreparationId: preparation.preparationId,
+      exactPreparationDigest: preparation.preparationDigest,
+      calldataHash: tx.calldataHash,
+      semanticDigest: tx.semanticDigest,
+      expectedBeneficiary: tx.expectedBeneficiary.toLowerCase(),
+      exactBuyerSpendUSDC: tx.exactBuyerSpendUSDC,
+      maxTotalSpendUSDC: tx.maxTotalSpendUSDC,
+      validUntilMs: tx.validUntilMs,
+    });
+    const digest = createHash("sha256").update(payload).digest("hex");
+    return {
+      ...commitment,
+      commitmentId: `commit-exact-${digest.slice(0, 16)}`,
+      commitmentDigest: digest,
+      exactPreparationId: preparation.preparationId,
+      exactPreparationDigest: preparation.preparationDigest,
+      calldataHash: tx.calldataHash,
+      semanticDigest: tx.semanticDigest,
+      expectedBeneficiary: tx.expectedBeneficiary,
+      expiresAtMs: Math.min(commitment.expiresAtMs, tx.validUntilMs),
+      status: "EXACT_TRANSACTION_BOUND",
+      executionStatus: "NOT_AUTHORIZED",
+      canExecute: false,
+    };
+  }
+
   public static createCommitment(
     intent: TypedRiskIntent,
     proposal: ActionProposal,
