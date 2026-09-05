@@ -1,276 +1,163 @@
 # HedgeOS
 
-> **Protect outcomes, not instruments.**
+**Protect outcomes, not instruments.**
 
-HedgeOS is a **verifiable risk-intent pre-execution layer for Thetanuts Finance on Base Mainnet (Chain ID 8453)**. It helps users express downside-protection goals in human terms, converts those goals into structured risk constraints, reads live Thetanuts OptionBook market data, evaluates feasible Long Put protection paths deterministically, and keeps financial authorization outside the AI boundary.
+HedgeOS is a non-custodial Risk Intent system for Thetanuts Finance on Base. It helps beginners discover observed long-put protection trade-offs, lets advanced users enter exact limits, compiles the user's choice into a confirmed Typed Risk Intent, applies deterministic financial policy, prepares exact unsigned OptionBook calldata, and verifies externally executed results from Base evidence.
 
-## What HedgeOS Does
+HedgeOS has no private-key, mnemonic, seed-phrase, signer, or autonomous transaction-broadcast path. A user-controlled wallet or execution system remains the financial authorization boundary.
 
-HedgeOS supports two portfolio-entry paths:
+## Problem
 
-- **Analyse a Base address** — read public Base Mainnet balances without connecting a wallet or requesting a private key.
-- **Enter holdings manually** — users can describe the asset and amount they want to protect.
+Options interfaces often require a user to choose strikes, option terminology, volatility assumptions, and order mechanics before learning what protection is feasible. Asking a beginner to invent a maximum-loss percentage and budget creates the same problem in different words. HedgeOS starts with factual situation information and derives understandable trade-offs from a coherent market snapshot and deterministic math.
 
-The current demo also supports an explicitly labelled **Recorded Demo Portfolio** mode. The demo address is user-controlled, while the displayed balance is synthetic demo data and is clearly marked **NOT LIVE FUNDS**.
+Protection figures are **MODELED AT EXPIRY** under the stated spot, fill-cost, quantity, and payoff assumptions. They are not guarantees of future performance.
 
-## Core Flow
+## Simple Mode — Help me choose protection
 
-```text
-User portfolio / protection goal
-        ↓
-AI structured extraction
-(untrusted draft only)
-        ↓
-Schema validation + provenance
-        ↓
-User review / confirmation
-        ↓
-Live Thetanuts OptionBook read
-        ↓
-Deterministic protection discovery
-        ↓
-Feasible Long Put choices
-        │
-        └── if no exact live match:
-            Long Put RFQ specification
-            (NOT SUBMITTED / UNPRICED)
-        ↓
-Final typed risk intent
-        ↓
-Financial Constitution
-        ↓
-Read-only preview / simulation
-        ↓
-Fresh revalidation
-        ↓
-Exact unsigned transaction preparation
-        ↓
-External user-controlled authorization boundary
-```
+A user can write:
 
-HedgeOS does **not** keep a private key, sign transactions, or autonomously broadcast financial transactions.
+> I have 2 ETH and I'm worried the price may fall this week. I don't know what protection makes sense.
 
-## Thetanuts Integration
+AI extracts factual situation fields: asset, exposure, timeframe, and missing factual information. It does not choose a risk tolerance, budget, strategy, or financially passing candidate.
 
-HedgeOS integrates with the official `@thetanuts-finance/thetanuts-client` SDK and Base Mainnet.
+HedgeOS reads Thetanuts market evidence, permits only unambiguous taker-buy single-strike vanilla puts, verifies exact sizing and buyer spend, calculates modeled-at-expiry downside, removes dominated candidates, and presents the observed Pareto frontier:
 
-Current integration includes:
+- **LOWER COST**: lowest verified-cost frontier point.
+- **STRONGER MODELED PROTECTION**: lowest modeled-downside frontier point.
+- **MID-RANGE TRADE-OFF**: median verified-cost frontier point, shown only when at least three frontier points exist.
 
-- Live OptionBook order retrieval
-- ETH / WETH / cbBTC / USDC portfolio reads
-- PUT direction and single-strike eligibility checks
-- Expiry and order-validity checks
-- Maker-capacity checks
-- Exact option sizing
-- Read-only `previewFillOrder` validation
-- Verified buyer-spend evidence
-- Deterministic modeled-at-expiry downside calculations
-- Long Put RFQ specification fallback
-- Exact unsigned transaction preparation
-- Read-only on-chain transaction / position verification logic
+There is no weighted recommendation score and no “best” label. Choosing an outcome creates a new draft Typed Risk Intent that requires explicit confirmation.
 
-The currently supported executable strategy path is **single-leg Long Put**. Put Spread remains intentionally blocked until a defensible strike-selection and tail-risk policy is implemented.
+## Advanced Mode — I already know my limits
 
-## Safety and Authority Model
+Advanced Mode accepts asset, exposure, maximum modeled-at-expiry downside, maximum USDC protection budget, and horizon. Field provenance distinguishes `USER_EXPLICIT`, `AI_INFERRED`, and `SYSTEM_DEFAULT`; material inferred fields require review. The confirmed result enters the same solver, Financial Constitution, preparation, and verification core used by Simple Mode.
 
-The main invariant is:
+## No-dead-end outcomes
 
-```text
-Human Language ≠ Financial Authorization
-```
+An exact request returns one of these truthful states:
 
-AI may interpret and explain. Deterministic code verifies. Financial authorization remains external and user-controlled.
+- feasible OptionBook protection;
+- observed market trade-offs;
+- a proposed one-dimension alternative for explicit review;
+- an unsubmitted and unpriced RFQ specification;
+- a precise infeasibility explanation; or
+- live market unavailable.
 
-Key protections include:
+A market-read failure is never converted into an empty orderbook or RFQ conclusion. Selecting an alternative creates a new draft/version; HedgeOS never mutates a confirmed intent or silently relaxes a constraint.
 
-- AI output is treated as an untrusted draft.
-- Missing budget or loss values are never invented.
-- Material inferred fields require review.
-- Unknown evidence never becomes `PASS`.
-- Market data can fail closed rather than fabricate liquidity.
-- Snapshot/demo data is explicitly labelled as not live.
-- RFQ specification does not mean RFQ submission.
-- Read-only preview does not mean execution.
-- Exact transaction preparation does not mean authorization.
-- No private key is stored or used by HedgeOS.
+## Financial evidence foundation
 
-## Demo Portfolio Mode
+The installed `@thetanuts-finance/thetanuts-client` package is the protocol integration source of truth.
 
-For a reproducible hackathon demo, HedgeOS supports a controlled recorded portfolio.
+- Base Mainnet chain ID: `8453`.
+- OptionBook and OptionFactory targets are resolved from the installed SDK chain configuration.
+- Supported execution strategy: `LONG_PUT` only.
+- Direction: SDK raw `isLong=true` means the maker sells, so the HedgeOS taker buys.
+- Structure: exactly one strike, `isCall=false`, and an SDK-configured vanilla PUT implementation.
+- Validity: order fill deadline and option expiry must be in the future; maker capacity must be positive and sufficient.
+- Quantity: exposure base units are converted to internal 18-decimal contract units and then exactly to OptionBook 6-decimal units. Non-representable quantities fail closed.
+- Spend: SDK `previewFillOrder` must return the requested contract quantity and exact USDC fill amount.
+- Fees: the buyer fill amount is verified separately. SDK `getFees(token, referrer)` represents claimable referrer-fee state, so HedgeOS does not call it a buyer execution fee. Fee breakdown remains `INCOMPLETE` where it cannot be proven.
+- Policy thresholds: quantities, premium/spend caps, and modeled-downside PASS/FAIL comparisons use integer/rational arithmetic. JavaScript numbers are used for display.
 
-Example `.env` configuration:
+## Financial Constitution
 
-```env
-DEMO_PORTFOLIO_MODE=true
-DEMO_PORTFOLIO_ADDRESS=0xYOUR_DEMO_ADDRESS
-```
+AI never decides whether a candidate passes. Deterministic policy checks confirmed intent binding, asset, Thetanuts protocol, long-put structure, taker direction, exact quantity, capacity, order validity, expiry/horizon coverage, verified buyer spend, budget, modeled-at-expiry downside, and evidence availability. Unknown material evidence produces `INCOMPLETE`, `NOT_AVAILABLE`, or `FAIL`; it never silently becomes `PASS`.
 
-When the configured address is analysed, the UI clearly displays:
+## Exact non-custodial execution preparation
+
+After confirmation and collection of an expected beneficiary address, HedgeOS performs a fresh market read and reruns policy. It then uses the SDK's non-writing `previewFillOrder` and `encodeFillOrder` methods to produce:
+
+- `chainId`, `to`, `data`, and `value` for an unsigned `OptionBook.fillOrder` call;
+- the signed order semantics, maker, nonce, direction, implementation, all strikes, expiry, order deadline, price feed, collateral, exact quantity, signature, referrer, spend cap, and beneficiary;
+- `keccak256(calldata)`; and
+- a canonical SHA-256 semantic digest and exact execution commitment.
+
+Any material mutation changes the binding. HedgeOS does not sign, send, or broadcast the transaction. The external wallet must separately review any required token approval and the prepared call.
+
+## External authorization and on-chain verification
+
+The preparation API returns a transaction request for an external user-controlled wallet or executor. After external execution, the user returns a transaction hash to `POST /api/v1/executions/verify`.
+
+The read-only verifier checks Base 8453, transaction and receipt existence, receipt success, confirmation policy, canonical block hash, canonical OptionBook target, exact calldata hash, native value, sender/beneficiary, decoded `fillOrder` action, and expected `OrderFilled` fields. It then reads the resulting option contract and checks deployed bytecode, buyer, seller, implementation, full strikes, expiry, price feed, collateral token, exact contract quantity, and canonical Thetanuts factory relationship.
+
+A successful receipt alone is insufficient evidence. `PROTECTION_CONFIRMED_ON_CHAIN` appears only for `POSITION_CONFIRMED`, when transaction, protocol event, and resulting contract state agree. Other states include `PENDING_CONFIRMATIONS`, `EXECUTION_OBSERVED`, `MISMATCH`, `REVERTED`, `REORGED_OR_UNSTABLE`, and `INSUFFICIENT_EVIDENCE`.
+
+## RFQ truthfulness
+
+HedgeOS can create `RFQ_SPECIFICATION_PREPARED` with `NOT_SUBMITTED`, `UNPRICED`, and `POLICY_INCOMPLETE_PENDING_PRICING`. It does not submit, price, or execute an RFQ.
+
+## Tamper-evident audit evidence
+
+SQLite stores intents, audit receipts, discovery snapshots, exact preparations, handoffs, and execution verifications. Canonical digests are recomputed when evidence records are read. Records link intent, market snapshot, candidate, policy decision, preview, proposal, authorization, exact transaction, external transaction, block/log, and position evidence.
+
+This is a **tamper-evident audit record**, not an immutable database. External anchoring would be required for cryptographic immutability against an operator controlling both the application and database.
+
+## Architecture
 
 ```text
-RECORDED DEMO PORTFOLIO • NOT LIVE FUNDS
+Simple factual situation ─┐
+                         ├─> observed discovery ─> user choice ─┐
+Advanced exact limits ───┘                                      │
+                                                                v
+Typed Risk Intent draft -> explicit confirmation -> live OptionBook snapshot
+  -> eligibility + exact sizing + modeled-at-expiry math
+  -> deterministic Financial Constitution
+  -> SDK preview -> exact unsigned calldata + semantic commitment
+  -> external user-controlled authorization/signing/broadcast
+  -> transaction hash -> Base receipt + Thetanuts event verification
+  -> option-contract verification -> tamper-evident audit evidence
 ```
 
-The synthetic balance is for demonstration only. Normal Base Mainnet portfolio reads remain available when demo mode is disabled or a different address is analysed.
+## API highlights
 
-## Environment
+- `POST /api/v1/discovery/parse` — factual Simple Mode extraction.
+- `POST /api/v1/discovery/search` — deterministic discovery from one captured market snapshot.
+- `POST /api/v1/discovery/:id/compile` — selected candidate to a new draft intent.
+- `POST /api/v1/intents/parse` — Advanced Mode intent parsing.
+- `PATCH /api/v1/intents/:id` and `POST /api/v1/intents/:id/confirm` — explicit review/version lifecycle.
+- `POST /api/v1/intents/:id/solve` — exact solver, alternatives, or truthful RFQ specification.
+- `POST /api/v1/intents/:id/alternatives/apply` — revalidate a proposed one-dimension change and create a new draft/version.
+- `POST /api/v1/executions/prepare` — fresh revalidation and exact unsigned transaction preparation.
+- `POST /api/v1/executions/verify` — independent transaction, event, and position verification.
+- `GET /healthz`, `GET /readyz`, `GET /api/v1/market/status`, and `GET /api/v1/ai/status` — runtime status.
 
-Create a local `.env` file in the project root.
+## Quickstart
 
-Typical variables:
-
-```env
-INTENT_PROVIDER=...
-LLM_PROVIDER=...
-LLM_MODEL=...
-GEMINI_API_KEY=...
-BASE_RPC_URL=...
-HEDGEOS_DB_PATH=...
-HEDGEOS_ALLOWED_ORIGINS=...
-DEMO_SNAPSHOT_MODE=...
-DEMO_PORTFOLIO_MODE=...
-DEMO_PORTFOLIO_ADDRESS=...
-```
-
-**Never commit `.env`, API keys, private keys, wallet keystores, or other secrets.**
-
-## Installation
+Requirements: Node.js 22+ and npm.
 
 ```bash
 npm install
-```
-
-## Run Locally
-
-Backend:
-
-```bash
+copy .env.example .env
+npm run typecheck
+npm run test
+npm run build:client
 npm run start:server
 ```
 
-Frontend:
+Set `BASE_RPC_URL` for Base reads. For real Gemini extraction, configure `INTENT_PROVIDER=real`, `LLM_PROVIDER=gemini`, an API key, and a model identifier supported by the provider account. The API reports the configured model; the product does not hardcode a model-version claim.
+
+## Tests
+
+`npm run test` is deterministic and does not require a successful live market read. Coverage includes intent provenance and confirmation, adversarial LLM output, market honesty, SDK sizing, exact arithmetic, order direction/structure/deadline gates, Pareto discovery, feasibility alternatives, proposal/simulation binding, exact calldata preparation, on-chain negative cases, persistence, digest revalidation, security middleware, stale evidence, and custody regressions.
+
+Before submission, run:
 
 ```bash
-npm run dev:client
+npm run typecheck
+npm run test
+npm run build:client
+npm audit --audit-level=high
 ```
 
-Open:
+Optional live smoke checks must remain separate and report failures honestly.
 
-```text
-http://localhost:5173
-```
+## Current limitations
 
-Backend health endpoints:
-
-```text
-http://localhost:3000/healthz
-http://localhost:3000/readyz
-```
-
-## Verification
-
-Type-check:
-
-```bash
-npx tsc --noEmit
-```
-
-Tests:
-
-```bash
-npm test
-```
-
-Build:
-
-```bash
-npm run build
-```
-
-The last full pre-demo QA run passed **265 / 265 automated tests**, TypeScript checks, and the production build. After any local demo-specific edits, rerun the three commands above before the final submission.
-
-## Current Demo Status
-
-Working:
-
-- Public Base-address onboarding
-- Controlled recorded portfolio mode
-- Explicit `NOT LIVE FUNDS` demo disclosure
-- Live Thetanuts OptionBook reads
-- Deterministic order eligibility filtering
-- Long Put discovery path
-- Honest precise-infeasibility handling
-- Long Put RFQ specification fallback
-- Financial-policy verification
-- Read-only preview architecture
-- Exact unsigned transaction preparation
-- Read-only on-chain verification logic
-
-Known demo limitation:
-
-Live OptionBook orders are highly time-sensitive. A user request may have no exact matching order because of expiry, sizing, maker capacity, implementation eligibility, or preview requirements. In that case HedgeOS fails closed and produces an unsubmitted RFQ specification rather than fabricating a quote.
-
-## Repository Safety
-
-Commit source code, tests, documentation, and package metadata.
-
-Do **not** commit:
-
-```text
-.env
-.env.*
-node_modules/
-demo-wallet-keystore.json
-demo-wallet-address.txt
-*.db
-*.sqlite
-*.sqlite3
-coverage/
-dist/
-.vite/
-*.log
-```
-
-Keep only safe templates such as `.env.example` if needed.
-
-## Suggested Project Structure
-
-```text
-src/
-  client/
-  server/
-  services/
-  providers/
-  repositories/
-  security/
-  types/
-  utils/
-
-tests/
-
-package.json
-package-lock.json
-tsconfig.json
-vite.config.*
-README.md
-.gitignore
-```
-
-Optional project documentation can also be committed if it reflects the current implementation:
-
-```text
-JUDGE_QA.md
-DEMO_PLAN.md
-DEMO_VIDEO_SCRIPT.md
-PITCH_SCRIPT.md
-SECURITY_MODEL.md
-TRACK_COMPLIANCE.md
-```
-
-## Positioning
-
-**HedgeOS converts a human risk outcome into a verifiable Thetanuts protection proposal while keeping financial authorization outside the AI boundary.**
-
-The product goal is simple:
-
-> **Users choose outcomes. HedgeOS compiles the protection.**
+- Only fully covered, single-leg vanilla `LONG_PUT` is supported. Put spreads remain blocked until a defensible tail-risk policy exists.
+- Discovery reflects observed snapshot liquidity and does not predict future availability.
+- Payoff and downside figures are modeled at expiry and do not model interim option value, post-revalidation slippage, tax, or every wallet approval requirement.
+- The exact buyer fill amount is bound; fee breakdown is not asserted where the installed SDK does not provide buyer-fee semantics.
+- HedgeOS does not submit RFQs.
+- HedgeOS does not hold keys, connect a backend signer, fund a wallet, approve tokens, or broadcast transactions.
+- Position confirmation depends on Base RPC availability, configured confirmations, expected Thetanuts events, and readable option-contract state.
